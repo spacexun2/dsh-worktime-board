@@ -1,0 +1,5 @@
+# Host 半场挂载：插件本体即 Cordis 插件（src/index.ts 导出 name/inject/Config/apply）；
+# 同包 dsh.client 提供 Web 半场（lib/client.js，右下角浮动看板）。
+- insert:
+    - id: dsh-worktime-board
+      name: '@dsh-external/dsh-worktime-board'
