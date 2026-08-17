@@ -500,6 +500,8 @@ export function careerBonus(tier: number): number {
 }
 
 /** 应用突破奖励：基础值 + 累计奖励；若加奖励后跨越新境界 → 连锁突破（奖励叠加，直到不再升档）。
+ *  maxSteps（2026-08-17 一天一结算）：单次结算最多推进 maxSteps 档（默认 Infinity 保持连锁语义；buildRange 传 1 →
+ *  突破拆到逐日结算，生涯档位随时间逐档增长，避免一次结算把生涯直接灌到最高档）。
  *  晋升失败机制（用户定稿）：突破尝试有 breakthroughFailPct 概率失败 → 回退到「本应晋升的最高境界的下一级」0% 进度
  *  （只退一级，规避连升多级掉太多；罚金累计到 failPenalty，成功突破后勾销）。
  *  存量数据豁免：rng 传恒 1（如历史回填中）即永不失败——失败只作用于实时新晋升。
@@ -509,16 +511,19 @@ export function applyBreakthrough(
   careerTier: number,
   failPenalty = 0,
   rng: () => number = Math.random,
+  maxSteps = Number.POSITIVE_INFINITY,
 ): { value: number; tier: number; bonus: number; failPenalty: number; failed: boolean } {
-  // 先无失败连锁出「本应晋升的最高境界」targetTier
+  // 先无失败连锁出「本应晋升的最高境界」targetTier（受 maxSteps 限制）
   let tier = careerTier
   let bonus = careerBonus(tier)
   let score = baseValue + bonus - failPenalty
+  let steps = 0
   for (;;) {
-    if (tier >= 11) break
+    if (tier >= 11 || steps >= maxSteps) break
     const gate = REALM_THRESHOLDS[tier] // 下一境界门槛
     if (score < gate) break
     tier++
+    steps++
     failPenalty = 0 // 无失败假设下罚金全勾销
     bonus = careerBonus(tier)
     score = baseValue + bonus - failPenalty

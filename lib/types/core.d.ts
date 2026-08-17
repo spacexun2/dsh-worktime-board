@@ -178,11 +178,13 @@ export declare function breakthroughBonus(tier: number): number;
 /** 累计突破奖励：生涯最高境界档 tier 的奖励总和（突破 1..tier 各次之和，只升不降）。 */
 export declare function careerBonus(tier: number): number;
 /** 应用突破奖励：基础值 + 累计奖励；若加奖励后跨越新境界 → 连锁突破（奖励叠加，直到不再升档）。
+ *  maxSteps（2026-08-17 一天一结算）：单次结算最多推进 maxSteps 档（默认 Infinity 保持连锁语义；buildRange 传 1 →
+ *  突破拆到逐日结算，生涯档位随时间逐档增长，避免一次结算把生涯直接灌到最高档）。
  *  晋升失败机制（用户定稿）：突破尝试有 breakthroughFailPct 概率失败 → 回退到「本应晋升的最高境界的下一级」0% 进度
  *  （只退一级，规避连升多级掉太多；罚金累计到 failPenalty，成功突破后勾销）。
  *  存量数据豁免：rng 传恒 1（如历史回填中）即永不失败——失败只作用于实时新晋升。
  *  返回最终总分（含奖励扣罚）、生涯最高档、累计奖励、罚金、是否失败。纯函数（rng 可注入，可单测）。 */
-export declare function applyBreakthrough(baseValue: number, careerTier: number, failPenalty?: number, rng?: () => number): {
+export declare function applyBreakthrough(baseValue: number, careerTier: number, failPenalty?: number, rng?: () => number, maxSteps?: number): {
     value: number;
     tier: number;
     bonus: number;

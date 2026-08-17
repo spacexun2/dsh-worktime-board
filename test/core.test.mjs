@@ -179,6 +179,30 @@ test('突破奖励：每突破一境界送「下一境界门槛 × 5%」进度�
   assert.equal(r0.value, 0)
 })
 
+test('applyBreakthrough maxSteps=1（2026-08-17 一天一结算：单次结算最多突破 1 档）', () => {
+  const ok = () => 1
+  // 基础 29.5 万本可连锁 7 档；maxSteps=1 只推进 1 档（生涯 0 → 1 筑基）
+  const r = applyBreakthrough(295000, 0, 0, ok, 1)
+  assert.equal(r.tier, 1)
+  assert.equal(r.bonus, 12.5)             // 仅筑基门槛奖励（金丹门槛 250×5%）
+  assert.equal(r.value, 295013)           // ceil(295000 + 12.5)
+  // 生涯 7 起步：基础 36 万 + 奖励 34450 = 394450 ≥ 35万门槛 → 只进 1 档（8 渡劫），不再连锁到 9
+  const r2 = applyBreakthrough(360000, 7, 0, ok, 1)
+  assert.equal(r2.tier, 8)
+  assert.equal(r2.bonus, careerBonus(8))
+  assert.equal(r2.value, 360000 + careerBonus(8))
+  // 未达下一门槛：不动
+  const r3 = applyBreakthrough(1000, 2, 0, ok, 1)
+  assert.equal(r3.tier, 2)
+  assert.equal(r3.value, 1000 + careerBonus(2))
+  // 失败路径受 maxSteps 约束：基础 36 万、生涯 7、必失败 → 本应 8 的下一级 = 7（大乘 0% 进度）
+  const fail = () => 0
+  const rf = applyBreakthrough(360000, 7, 0, fail, 1)
+  assert.equal(rf.failed, true)
+  assert.equal(rf.tier, 7)
+  assert.equal(rf.value, 200000) // 大乘门槛 20 万
+})
+
 test('晋升失败：回退到本应晋升最高境界的下一级 0% 进度（只退一级）', () => {
   const fail = () => 0 // rng 恒 0 → 必失败
   // 连升多级失败（大乘 7 起步，基础 36 万 → 无失败连锁到渡劫 8）：失败回退 7（大乘）0% 进度 = 20 万门槛，只退一级
