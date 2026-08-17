@@ -677,11 +677,21 @@ export function apply(ctx: AppContext, config: Config): void {
     return out.sort((a, b) => a.day.localeCompare(b.day))
   }
 
-  function buildRange(range: 'day' | 'week' | 'month'): unknown {
-    const cached = rangeCache.get(range)
+  function buildRange(range: 'day' | 'week' | 'month', date?: string): unknown {
+    const cacheKey = range + '|' + (date ?? '')
+    const cached = rangeCache.get(cacheKey)
     if (cached !== undefined && Date.now() - cached.at < 2000) return cached.value
     const all = daySummaries()
-    const days = range === 'day' ? all.slice(-1) : range === 'week' ? all.slice(-7) : all.slice(-30)
+    // day 口径：默认严格今天（无 date 参数时不回退"最新有数据日"——凌晨今天无活动时
+    // 不应把昨天数据显示成"今日"）；date 参数指定历史日（有记录用记录，无记录补空）
+    let days: Array<{ day: string; ranch: ReturnType<typeof summarizeRanch> }>
+    if (range === 'day') {
+      const target = (date !== undefined && /^\d{4}-\d{2}-\d{2}$/.test(date)) ? date : dayKeyOf(new Date())
+      const found = all.find((d) => d.day === target)
+      days = found !== undefined ? [found] : [{ day: target, ranch: summarizeRanch(target, []) }]
+    } else {
+      days = range === 'week' ? all.slice(-7) : all.slice(-30)
+    }
     const activeDaysList = days.filter((d) => d.ranch.activeMinutes > 0)
     const activeDays = activeDaysList.length
     const day = days[days.length - 1]?.day ?? dayKeyOf(new Date())
@@ -921,7 +931,7 @@ export function apply(ctx: AppContext, config: Config): void {
       heat,
       backfill: { complete: backfillComplete, done: backfillDone, total: backfillTotal },
     }
-    rangeCache.set(range, { at: Date.now(), value })
+    rangeCache.set(cacheKey, { at: Date.now(), value })
     return value
   }
 
@@ -944,7 +954,8 @@ export function apply(ctx: AppContext, config: Config): void {
         }
         const q = new URLSearchParams(url.split('?')[1] ?? '')
         const range = (q.get('range') === 'week' || q.get('range') === 'month') ? q.get('range') : 'day'
-        json(200, { ok: true, ...(buildRange(range as 'day' | 'week' | 'month') as object) })
+        const date = q.get('date') ?? undefined // 仅 day 口径生效：查看指定历史日（无记录日返回空数据）
+        json(200, { ok: true, ...(buildRange(range as 'day' | 'week' | 'month', date) as object) })
       } catch (e) {
         json(500, { ok: false, error: String(e) })
       }

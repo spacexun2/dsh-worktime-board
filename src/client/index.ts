@@ -121,12 +121,30 @@ function injectCss(): void {
 .wtb-badgeSwitch{flex:none;width:22px;height:22px;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:11px;color:#8a8a8a;border:1px solid rgba(255,255,255,.1);background:transparent;cursor:pointer}
 .wtb-badgeSwitch:hover{color:#fff;border-color:rgba(255,255,255,.3)}
 .wtb-panel{position:fixed;width:400px;max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);display:flex;flex-direction:column;background:rgba(24,24,30,.96);border:1px solid rgba(255,255,255,.09);border-radius:14px;box-shadow:0 12px 44px rgba(0,0,0,.6);overflow:hidden}
-.wtb-head{display:flex;align-items:center;gap:8px;padding:10px 12px;background:rgba(255,255,255,.04);cursor:grab;user-select:none;border-bottom:1px solid rgba(255,255,255,.06)}
+.wtb-head{position:relative;display:flex;align-items:center;gap:8px;padding:10px 12px;background:rgba(255,255,255,.04);cursor:grab;user-select:none;border-bottom:1px solid rgba(255,255,255,.06)}
 .wtb-head:active{cursor:grabbing}
 .wtb-title{font-size:13px;font-weight:700;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .wtb-tabs{display:flex;gap:4px;margin-left:4px}
 .wtb-tab{border:none;background:transparent;color:var(--dsw-alias-label-tertiary,#9a9a9a);font-size:12px;padding:4px 8px;border-radius:6px;cursor:pointer}
 .wtb-tab[data-active="true"]{background:rgba(255,255,255,.12);color:#fff}
+.wtb-dateWrap{display:flex;align-items:center;gap:4px;margin-left:auto}
+.wtb-dateBtn{border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.08);color:#fff;font-size:12px;padding:2px 8px;border-radius:6px;cursor:pointer;white-space:nowrap}
+.wtb-dateBtn:hover{background:rgba(255,255,255,.18)}
+.wtb-today{border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.08);color:#fff;font-size:11px;padding:2px 8px;border-radius:6px;cursor:pointer;white-space:nowrap}
+.wtb-today:hover{background:rgba(255,255,255,.18)}
+.wtb-calendar{position:absolute;top:calc(100% + 4px);right:30px;z-index:10;background:#1e1f26;border:1px solid rgba(255,255,255,.15);border-radius:10px;padding:8px;box-shadow:0 8px 24px rgba(0,0,0,.5);width:216px}
+.wtb-calHead{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.wtb-calTitle{font-size:12px;color:#fff;font-weight:600}
+.wtb-calNav{border:none;background:rgba(255,255,255,.08);color:#fff;width:22px;height:22px;border-radius:6px;cursor:pointer;font-size:14px;line-height:1}
+.wtb-calNav:hover{background:rgba(255,255,255,.18)}
+.wtb-calGrid{display:grid;grid-template-columns:repeat(7,1fr);gap:2px}
+.wtb-calDow{font-size:10px;color:#9a9a9a;text-align:center;padding:2px 0}
+.wtb-calCell{border:none;background:transparent;color:#e8e8e8;font-size:12px;height:24px;border-radius:6px;cursor:pointer;font-variant-numeric:tabular-nums}
+.wtb-calCell:hover{background:rgba(255,255,255,.14)}
+.wtb-calCell-sel{background:#ffb347;color:#1e1f26;font-weight:700}
+.wtb-calCell-today{box-shadow:inset 0 0 0 1px #ffb347}
+.wtb-calCell-future{opacity:.35;cursor:default}
+.wtb-calCell-future:hover{background:transparent}
 .wtb-close{border:none;background:transparent;color:#9a9a9a;font-size:16px;cursor:pointer;padding:2px 6px;border-radius:6px}
 .wtb-close:hover{background:rgba(255,255,255,.1);color:#fff}
 .wtb-body{overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:12px;flex:1;min-height:0}
@@ -529,6 +547,13 @@ class WorktimePanel {
   /** 输入次数卡片口径：false = 全量输入（user/message，与计分同源）；true = 人输入（真人 prompt）。点击卡片切换。 */
   private inputHuman = false
   private tab: Range = 'day'
+  /** 日视图查看的历史日期（YYYY-MM-DD）；null = 实时跟随今日。 */
+  private viewDate: string | null = null
+  /** 自定义日历弹层：是否打开；calMonth = 当前显示的年月（YYYY-MM）。 */
+  private calOpen = false
+  private calMonth = ''
+  /** 日历弹层外部点击关闭的 document 监听器（实例级单例，防每次 render 重复注册累积）。 */
+  private calDocHandler: ((e: MouseEvent) => void) | null = null
   private heatKind: HeatKind = 'duration'
   private sortBy: SortBy = 'active'
   private showAll = false
@@ -572,12 +597,34 @@ class WorktimePanel {
 
   dispose(): void {
     this.disposed = true
+    this.detachCalDocHandler()
     if (this.timer !== null) clearInterval(this.timer)
     this.host.innerHTML = ''
   }
 
+  /** 移除日历外部点击关闭的 document 监听器（幂等；随弹层关闭 / 面板收起 / 组件卸载调用）。 */
+  private detachCalDocHandler(): void {
+    if (this.calDocHandler !== null) {
+      document.removeEventListener('click', this.calDocHandler)
+      this.calDocHandler = null
+    }
+  }
+
   private pollMs(): number {
     return this.open ? POLL_MS_OPEN : POLL_MS_CLOSED
+  }
+
+  /** 本地今日键 'YYYY-MM-DD'（与 host dayKeyOf 一致）。 */
+  private todayKey(): string {
+    const n = new Date()
+    return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`
+  }
+
+  /** 日历弹层是否在交互中（打开或日期按钮聚焦）：是则跳过自动重建，防止轮询把弹层/焦点打断。 */
+  private calendarActive(): boolean {
+    if (this.calOpen) return true
+    const el = document.activeElement
+    return el !== null && el instanceof HTMLElement && el.classList.contains('wtb-dateBtn')
   }
 
   /** 关键数据是否无变化（用于跳过无谓重建——用户反馈"每次更新整体刷新"）。 */
@@ -648,11 +695,14 @@ class WorktimePanel {
     if (!force) this.busy = true
     try {
       const range = this.open ? this.tab : 'day'
-      const res = await fetch(`${STATE_URL}?range=${range}`, { cache: 'no-store' })
+      // 日视图历史日期：仅展开且停在 day tab 时生效（收起徽标始终看今日）
+      const date = this.open && this.tab === 'day' && this.viewDate !== null ? this.viewDate : null
+      const res = await fetch(`${STATE_URL}?range=${range}${date !== null ? `&date=${date}` : ''}`, { cache: 'no-store' })
       if (!res.ok) throw new Error(`http ${res.status}`)
       const body = (await res.json()) as State
       if (this.disposed) return
-      if (this.open && body.range !== this.tab) return // 期间又切换了：过期响应丢弃
+      // 期间又切换了：过期响应丢弃（date 指定时校验返回日，防快速切日期被旧响应覆盖）
+      if (this.open && (body.range !== this.tab || (date !== null && body.day !== date))) return
       const prev = this.data
       if (prev !== null && this.sameState(prev, body)) {
         this.data = body // 无实质变化：仅更新快照，不重建
@@ -667,6 +717,9 @@ class WorktimePanel {
         return
       }
       this.data = body
+      // 自动轮询时日历弹层打开（或日期按钮聚焦）：只更新数据快照，跳过重建（防弹层被打断）；
+      // 用户主动操作（force）走显式 render 兜底，不受此保护影响
+      if (!force && this.calendarActive()) return
       try {
         this.render()
       } catch (e) {
@@ -689,7 +742,41 @@ class WorktimePanel {
   }
 
   private rangeLabel(r: Range = this.tab): string {
-    return r === 'day' ? '今日' : r === 'week' ? '本周' : '本月'
+    if (r === 'day') return this.viewDate !== null ? this.viewDate.slice(5) : '今日'
+    return r === 'week' ? '本周' : '本月'
+  }
+
+  /** 自定义日历弹层：当前 calMonth 的月网格，点击日期选日（当天=回实时），可前后翻月。 */
+  private calendarHtml(): string {
+    const now = new Date()
+    const today = this.todayKey()
+    if (this.calMonth === '') {
+      this.calMonth = (this.viewDate ?? today).slice(0, 7)
+    }
+    const [y, m] = this.calMonth.split('-').map(Number)
+    const firstDow = new Date(y, m - 1, 1).getDay()
+    const daysInMonth = new Date(y, m, 0).getDate()
+    const cells: string[] = []
+    for (let i = 0; i < firstDow; i++) cells.push('<span class="wtb-calCell"></span>')
+    for (let d = 1; d <= daysInMonth; d++) {
+      const key = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+      const isSel = this.viewDate === key
+      const isToday = key === today
+      const isFuture = key > today
+      cells.push(`<button type="button" class="wtb-calCell${isSel ? ' wtb-calCell-sel' : ''}${isToday ? ' wtb-calCell-today' : ''}${isFuture ? ' wtb-calCell-future' : ''}" data-cal-day="${key}"${isFuture ? ' disabled' : ''}>${d}</button>`)
+    }
+    return `
+      <div class="wtb-calendar">
+        <div class="wtb-calHead">
+          <button type="button" class="wtb-calNav" data-cal-prev aria-label="上个月">‹</button>
+          <span class="wtb-calTitle">${y}年${m}月</span>
+          <button type="button" class="wtb-calNav" data-cal-next aria-label="下个月">›</button>
+        </div>
+        <div class="wtb-calGrid">
+          ${['日', '一', '二', '三', '四', '五', '六'].map((w) => `<span class="wtb-calDow">${w}</span>`).join('')}
+          ${cells.join('')}
+        </div>
+      </div>`
   }
 
   render(): void {
@@ -722,8 +809,10 @@ class WorktimePanel {
     this.host.querySelector('.wtb-badge')?.addEventListener('click', () => {
       this.open = true
       this.reschedule()
-      // 收起时 data 可能是 day 口径（徽标用），展开后立即拉当前 tab，避免错位显示
-      if (this.data === null || this.data.range !== this.tab) {
+      // 收起时 data 可能是 day 口径（徽标用），展开后立即拉当前 tab，避免错位显示；
+      // 日视图历史日期：收起期间 data 已被今日覆盖 → 需按 viewDate 重拉
+      if (this.data === null || this.data.range !== this.tab
+        || (this.tab === 'day' && this.viewDate !== null && this.data.day !== this.viewDate)) {
         void this.tick(true)
       }
       this.render()
@@ -801,6 +890,12 @@ class WorktimePanel {
           <div class="wtb-tabs">
             ${(['day', 'week', 'month'] as const).map((t) => `<button type="button" class="wtb-tab" data-active="${this.tab === t}" data-tab="${t}">${this.rangeLabel(t)}</button>`).join('')}
           </div>
+          ${this.tab === 'day' ? `
+          <span class="wtb-dateWrap">
+            <button type="button" class="wtb-dateBtn" data-cal-toggle title="选择查看日期" aria-label="选择查看日期">📅 ${this.viewDate !== null ? this.viewDate.slice(5) : '今日'}</button>
+            ${this.viewDate !== null ? `<button type="button" class="wtb-today" data-back-today title="回到今日">今日</button>` : ''}
+          </span>
+          ${this.calOpen ? this.calendarHtml() : ''}` : ''}
           <button type="button" class="wtb-close" aria-label="收起">✕</button>
         </div>
         <div class="wtb-body">
@@ -1375,6 +1470,8 @@ class WorktimePanel {
     if (root === null) return
     root.querySelector('.wtb-close')?.addEventListener('click', () => {
       this.open = false
+      this.calOpen = false
+      this.detachCalDocHandler()
       this.reschedule()
       this.render()
     })
@@ -1385,6 +1482,9 @@ class WorktimePanel {
           return // 重复点击当前 tab：数据已在，不重置不闪烁
         }
         this.tab = next
+        this.viewDate = null // 切换 tab 回到实时今日（历史日期只在 day tab 下生效）
+        this.calOpen = false
+        this.detachCalDocHandler()
         // reviewer 缺陷 B：tab 切换同步境界统计周期（day→day、week→week、month→month），
         // 使总分与四维行口径一致（day tab 下总分=今日，不混合近 7 天）；详情卡手动选择仍可覆盖
         this.realmPeriod = this.tab
@@ -1392,6 +1492,64 @@ class WorktimePanel {
         void this.tick(true)
         this.render()
       })
+    })
+    // 日视图日历：打开/关闭弹层（首次打开初始化到当前查看月）
+    root.querySelector('[data-cal-toggle]')?.addEventListener('click', () => {
+      this.calOpen = !this.calOpen
+      if (this.calOpen) {
+        this.calMonth = (this.viewDate ?? this.todayKey()).slice(0, 7)
+      } else {
+        this.detachCalDocHandler()
+      }
+      this.render()
+    })
+    // 日历翻月
+    root.querySelector('[data-cal-prev]')?.addEventListener('click', (e) => {
+      e.stopPropagation()
+      const [y, m] = this.calMonth.split('-').map(Number)
+      this.calMonth = `${y}-${String(m - 1 === 0 ? 12 : m - 1).padStart(2, '0')}`
+      if (m === 1) this.calMonth = `${y - 1}-12`
+      this.render()
+    })
+    root.querySelector('[data-cal-next]')?.addEventListener('click', (e) => {
+      e.stopPropagation()
+      const [y, m] = this.calMonth.split('-').map(Number)
+      this.calMonth = m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`
+      this.render()
+    })
+    // 日历选日：选中历史日 → 切换视图；选今天 = 回实时
+    root.querySelectorAll('[data-cal-day]').forEach((el) => {
+      el.addEventListener('click', () => {
+        const v = el.getAttribute('data-cal-day') ?? ''
+        this.viewDate = v !== this.todayKey() ? v : null
+        this.calOpen = false
+        this.detachCalDocHandler()
+        this.data = null
+        void this.tick(true)
+        this.render()
+      })
+    })
+    // 点日历/日期按钮以外的区域关闭弹层（监听器实例级单例：只注册一次，触发后移除，
+    // 避免每次 render 重建新闭包累积多个 document 监听器）
+    if (this.calOpen && this.calDocHandler === null) {
+      this.calDocHandler = (e: MouseEvent): void => {
+        const t = e.target as HTMLElement
+        if (t.closest('.wtb-calendar, .wtb-dateBtn') !== null) return
+        document.removeEventListener('click', this.calDocHandler!)
+        this.calDocHandler = null
+        this.calOpen = false
+        this.render()
+      }
+      setTimeout(() => document.addEventListener('click', this.calDocHandler!), 0)
+    }
+    // 「今日」按钮：清空历史日期回实时
+    root.querySelector('[data-back-today]')?.addEventListener('click', () => {
+      this.viewDate = null
+      this.calOpen = false
+      this.detachCalDocHandler()
+      this.data = null
+      void this.tick(true)
+      this.render()
     })
     root.querySelectorAll('.wtb-heatBtn').forEach((el) => {
       el.addEventListener('click', () => {
@@ -1500,7 +1658,7 @@ class WorktimePanel {
     const head = root.querySelector('.wtb-head') as HTMLElement | null
     if (head !== null) {
       head.addEventListener('pointerdown', (e: PointerEvent) => {
-        if ((e.target as HTMLElement).closest('.wtb-tab, .wtb-close') !== null) return
+        if ((e.target as HTMLElement).closest('.wtb-tab, .wtb-close, .wtb-dateBtn, .wtb-calendar, .wtb-today') !== null) return
         const startX = e.clientX
         const startY = e.clientY
         const rect = root.getBoundingClientRect()
