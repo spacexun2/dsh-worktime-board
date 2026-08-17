@@ -77,10 +77,13 @@
 本插件是标准 dsh **bundle**（声明了 `dsh.bundle.patch` + `dsh.client`），通过 profile 插件机制安装：
 
 ```bash
-# 方式一：GitHub 源直接安装（构建产物 lib/ 已入库，无需本地构建）
+# 方式一（推荐）：npm 包（正式发布后）
+dsh plugin --profile web add dsh-worktime-board
+
+# 方式二：GitHub 源直接安装（构建产物 lib/ 已入库，无需本地构建）
 dsh plugin --profile web add github:spacexun2/dsh-worktime-board
 
-# 方式二：本地目录（有源码时，从插件目录的上一级执行）
+# 方式三：本地目录（有源码时，从插件目录的上一级执行）
 dsh plugin --profile web add ./dsh-worktime-board
 ```
 

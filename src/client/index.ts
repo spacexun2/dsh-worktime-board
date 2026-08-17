@@ -97,6 +97,17 @@ interface State {
   backfill: { complete: boolean; done: number; total: number }
 }
 
+/** 会话标题来自持久化会话数据；插入 innerHTML 前必须同时转义文本与属性上下文。 */
+export function escapeHtml(value: unknown): string {
+  return String(value).replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  })[char]!)
+}
+
 function injectCss(): void {
   if (document.querySelector(`style[data-plugin-css="${CSS_ID}"]`) !== null) return
   const tag = document.createElement('style')
@@ -1095,7 +1106,8 @@ class WorktimePanel {
   /** 周/月聚合行（host v4）：activeDays>1 或 segments 为空 → 不画甘特段。列：线程 | 活跃(甘特条) | 时长 | 调用 | 上次（无汉字），完整信息进 title 悬停。 */
   private threadRow(t: ThreadRow): string {
     const absent = t.activeMinutes === 0 // host 补的归档空行：未出勤
-    const nameSpan = `<span class="wtb-threadName" data-archived="${t.archived}" title="${t.title}">${t.title}</span>`
+    const title = escapeHtml(t.title)
+    const nameSpan = `<span class="wtb-threadName" data-archived="${t.archived}" title="${title}">${title}</span>`
     const callsText = t.calls >= 10000 ? `${fmtWan(t.calls)}次` : `${t.calls}次`
     const metaTitle = `时长 ${fmtDur(t.activeMinutes)} · 调用 ${t.calls} 次 · 活跃 ${t.activeDays ?? 1} 天 · 最后活动 ${fmtAgo(t.lastActiveAt)}`
     const cols = (bar: string, dur: string, calls: string, ago: string) => `
@@ -1408,7 +1420,7 @@ class WorktimePanel {
       <div class="wtb-boardHead"><span class="wtb-boardHeadRank">名次</span><span>线程</span><span class="wtb-thc">分</span><span class="wtb-thc">时长</span><span class="wtb-thc">调用</span></div>` + top.map(({ t, score }, i) => `
       <div class="wtb-board">
         <span class="wtb-boardRank">${i === 0 ? '👑' : i === 1 ? '🥈' : '🥉'}</span>
-        <span class="wtb-boardName">${t.title}</span>
+        <span class="wtb-boardName">${escapeHtml(t.title)}</span>
         <span class="wtb-boardScore">${Math.round(score)}</span>
         <span class="wtb-boardDur">${fmtDur(t.activeMinutes)}</span>
         <span class="wtb-boardCalls">${t.calls >= 10000 ? fmtWan(t.calls) : t.calls}次</span>

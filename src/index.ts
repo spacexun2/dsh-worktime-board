@@ -16,6 +16,7 @@
  * 工具：worktime_summary（当前线程或牧场汇总）。
  */
 import type { Context } from '@deepseek-ai/cordis'
+import { createHash } from 'node:crypto'
 import { appendFileSync, copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
@@ -47,6 +48,9 @@ import {
 
 export const name = '@dsh-external/dsh-worktime-board'
 export const inject = ['webServer', 'tools', 'sessionQuery', 'workspaceRegistry']
+
+type SessionEventLike = { time?: number; type?: string; data?: any; seq?: unknown }
+type SeenEvent = { sourceId: string; time: number }
 
 export interface Config {
   retentionDays: number
@@ -98,6 +102,14 @@ const dshHome = (): string => {
   return env && env.trim() !== '' ? env : join(homedir(), '.dsh')
 }
 
+/** JSON 事件的键顺序在实时对象与落盘日志中未必一致；指纹必须与键顺序无关。 */
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return '[' + value.map(stableJson).join(',') + ']'
+  const record = value as Record<string, unknown>
+  return '{' + Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(',') + '}'
+}
+
 /** zstd 帧魔数。 */
 const ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
 
@@ -146,15 +158,18 @@ export function apply(ctx: AppContext, config: Config): void {
   /** 实时折叠游标：源会话 id → 实时已折叠的最大事件 time（展示 lastActiveAt 用，不持久化）。 */
   const liveCursor = new Map<string, number>()
   /** 回填去重水印：源会话 id → 回填已处理的最大事件 time（持久化；只被 foldLogFile 推进，
-   *  不被实时事件推进——修复：schema 重建后实时事件不再把水印推到 now 导致回填全跳过）。 */
+   *  不被实时事件推进——实时/回填重合靠事件指纹去重，避免仅靠时间戳吞掉乱序事件）。 */
   const backfillCursor = new Map<string, number>()
+  /** 实时和增量回填共享的事件指纹：仅保存回填水位之后（及水位相同）的事件，重启后仍可去重。 */
+  const seenEvents = new Map<string, SeenEvent>()
   /** 数据 schema 版本：bump 后触发一次全量重建（清空 byDay/cursor → 重扫）。v7：新增 userInputs 维度；v8：新增 humanInputs（人输入）维度；
    *  v9：无格式变化——触发全量重建以修复 v8 重建时回填水印被实时事件污染导致的历史数据丢失（liveCursor/backfillCursor 分离）；
    *  v10：新增计费输入维度（billedInputTokens/billedInputTokensPerSlot = uncached + cacheRead + cacheWrite，2026-08-17 与 live-stats 对齐）；
    *  v10 另修复：backfillComplete 后重载间隙漏计（改为增量追平）与重建中止双计（flushPendingLive 推进回填水印）。
    *  v11：单次结算最多突破 1 档（一天一结算）；score.realm 按最终 value 映射；周/月成长系数用日均段数。
-   *  v12：突破奖励**按周期独立结算**（periodSettle，无生涯历史状态 careerMaxTier/failPenalty/failedCount——用户定稿：非历史最高逻辑）。 */
-  const SCHEMA_VERSION = 12
+   *  v12：突破奖励**按周期独立结算**（periodSettle，无生涯历史状态 careerMaxTier/failPenalty/failedCount——用户定稿：非历史最高逻辑）。
+   *  v13：持久化实时/回填事件指纹；升级时全量重建，清除 v12 已可能重复的增量回填数据。 */
+  const SCHEMA_VERSION = 13
 
   /** 顶层线程判定：只有 session- 前缀的会话才是顶层线程（子 agent 是裸 uuid）。 */
   const isTopLevel = (id: string): boolean => id.startsWith('session-')
@@ -195,7 +210,7 @@ export function apply(ctx: AppContext, config: Config): void {
   /** 重建模式（schema 升级/首次运行）：回填完成前实时事件先入 pendingLive 缓冲，
    *  回填完成后按 backfillCursor 水印过滤放行——防回填与实时重复计数，也防回填跳过未折叠历史。 */
   let rebuildMode = false
-  const pendingLive: Array<{ srcId: string; t: number; event: { time?: number; type: string; data?: any } }> = []
+  const pendingLive: Array<{ srcId: string; t: number; event: SessionEventLike }> = []
   const PENDING_LIVE_MAX = 20000
   let dirty = false
   let lastFlushAt = 0
@@ -210,11 +225,28 @@ export function apply(ctx: AppContext, config: Config): void {
     return rec
   }
 
+  /** 仅为会改变统计值的事件生成指纹。优先使用 session 日志与实时事件共有的 seq；旧日志没有 seq 时退化为稳定 payload 哈希。 */
+  function eventFingerprint(sourceId: string, time: number, event: SessionEventLike): string | undefined {
+    if (event.type !== 'step/start' && event.type !== 'assistant/message' && event.type !== 'tool/call' && event.type !== 'tool/result' && event.type !== 'user/message' && event.type !== 'step/end') return undefined
+    const identity = event.seq === undefined
+      ? stableJson(event.data)
+      : `seq:${stableJson(event.seq)}`
+    return createHash('sha256').update(`${sourceId}\u0000${time}\u0000${event.type}\u0000${identity}`).digest('base64url')
+  }
+
+  /** 成功回填后，只保留需要与水位相等事件比对的指纹；水位之前的事件已由 cursor 覆盖。 */
+  function pruneSeenEvents(sourceId: string): void {
+    const cursor = backfillCursor.get(sourceId) ?? 0
+    for (const [key, event] of seenEvents) {
+      if (event.sourceId === sourceId && event.time < cursor) seenEvents.delete(key)
+    }
+  }
+
   function load(): void {
     try {
       const parsed = JSON.parse(readFileSync(dataFile, 'utf8')) as {
         records: SerializedRecord[]
-        meta?: { backfillComplete?: boolean; cursor?: Record<string, number>; schemaVersion?: number }
+        meta?: { backfillComplete?: boolean; cursor?: Record<string, number>; schemaVersion?: number; seen?: Array<[string, string, number]> }
       }
       if (parsed.meta?.schemaVersion !== SCHEMA_VERSION) {
         // 一次性迁移：旧版数据重建（游标续传无法补已折叠段的 llmMs）
@@ -236,7 +268,16 @@ export function apply(ctx: AppContext, config: Config): void {
       }
       backfillComplete = parsed.meta?.backfillComplete === true
       if (parsed.meta?.cursor) {
-        for (const [id, t] of Object.entries(parsed.meta.cursor)) backfillCursor.set(id, t)
+        for (const [id, t] of Object.entries(parsed.meta.cursor)) {
+          if (typeof t === 'number' && t > 0) backfillCursor.set(id, t)
+        }
+      }
+      for (const item of parsed.meta?.seen ?? []) {
+        if (!Array.isArray(item) || item.length !== 3) continue
+        const [key, sourceId, time] = item
+        if (typeof key === 'string' && typeof sourceId === 'string' && typeof time === 'number' && time > 0) {
+          seenEvents.set(key, { sourceId, time })
+        }
       }
       log(`loaded ${parsed.records.length} records (backfillComplete=${backfillComplete})`)
     } catch {
@@ -270,6 +311,7 @@ export function apply(ctx: AppContext, config: Config): void {
         meta: {
           backfillComplete,
           cursor: Object.fromEntries(backfillCursor),
+          seen: [...seenEvents].map(([key, event]) => [key, event.sourceId, event.time]),
           schemaVersion: SCHEMA_VERSION,
         },
       })
@@ -299,7 +341,7 @@ export function apply(ctx: AppContext, config: Config): void {
   /** 源会话 → 上一个 step 的 turn（turns 计数）。 */
   const lastTurn = new Map<string, number>()
 
-  const eventHandler = (session: { id: string }, event: { time: number; type: string; data?: any }): void => {
+  const eventHandler = (session: { id: string }, event: SessionEventLike): void => {
     const t = typeof event.time === 'number' && event.time > 0 ? event.time : Date.now()
     const srcId = session?.id ?? 'unknown'
     if (rebuildMode && pendingLive.length < PENDING_LIVE_MAX) {
@@ -309,10 +351,12 @@ export function apply(ctx: AppContext, config: Config): void {
     foldLive(srcId, t, event)
   }
 
-  /** 实时折叠（O(1)）：无条件计数，只推进 liveCursor（不碰 backfillCursor 回填水印）。 */
-  const foldLive = (srcId: string, t: number, event: { time?: number; type: string; data?: any }): void => {
+  /** 实时折叠（O(1)）：实时和回填共享持久化事件指纹；不把回填水位冒险推进到实时的时间。 */
+  const foldLive = (srcId: string, t: number, event: SessionEventLike): void => {
     const threadId = rootOf(srcId)
     if (!isTopLevel(threadId)) return // 只统计顶层线程；子 agent 事件归并到父线程，孤儿（无父链）忽略
+    const fingerprint = eventFingerprint(srcId, t, event)
+    if (fingerprint !== undefined && seenEvents.has(fingerprint)) return
     const prev = liveCursor.get(threadId)
     if (prev === undefined || t > prev) liveCursor.set(threadId, t)
     if (srcId !== threadId) {
@@ -396,6 +440,7 @@ export function apply(ctx: AppContext, config: Config): void {
       }
       default: break
     }
+    if (fingerprint !== undefined) seenEvents.set(fingerprint, { sourceId: srcId, time: t })
     markDirty()
   }
 
@@ -410,7 +455,7 @@ export function apply(ctx: AppContext, config: Config): void {
   })
 
   // ── 历史回填（游标续传 + 限速渐进，幂等） ────────────────────
-  /** 重建模式收尾：回填完成后放行缓冲的实时事件。已被回填覆盖（t ≤ 回填水印）的跳过，防重复计数；
+  /** 重建模式收尾：回填完成后放行缓冲的实时事件。已被回填覆盖的事件按水位+指纹跳过，防重复计数；
    *  v10 修复：被放行折叠的事件同时推进回填水印——重建中止后二次回填（cursor 仍为 0）不会把已折叠事件再计一次。 */
   function flushPendingLive(): void {
     rebuildMode = false
@@ -419,7 +464,9 @@ export function apply(ctx: AppContext, config: Config): void {
     log(`flush pending live events: ${q.length}`)
     const advanced = new Map<string, number>()
     for (const p of q) {
-      if (p.t <= (backfillCursor.get(p.srcId) ?? 0)) continue
+      const cursor = backfillCursor.get(p.srcId) ?? 0
+      const fingerprint = eventFingerprint(p.srcId, p.t, p.event)
+      if (p.t < cursor || p.t === cursor && (fingerprint === undefined || seenEvents.has(fingerprint))) continue
       foldLive(p.srcId, p.t, p.event)
       const cur = advanced.get(p.srcId) ?? 0
       if (p.t > cur) advanced.set(p.srcId, p.t)
@@ -427,6 +474,7 @@ export function apply(ctx: AppContext, config: Config): void {
     for (const [id, t] of advanced) {
       const prev = backfillCursor.get(id) ?? 0
       if (t > prev) backfillCursor.set(id, t)
+      pruneSeenEvents(id)
     }
   }
 
@@ -489,7 +537,7 @@ export function apply(ctx: AppContext, config: Config): void {
     }
   }
 
-  /** 解码一个 .jsonl.zstd（逐帧、限速），只折叠 time > 回填水印 的事件（幂等）。
+  /** 解码一个 .jsonl.zstd（逐帧、限速）：早于回填水位的事件跳过，水位相同及实时重合事件由指纹判重。
    *  子 agent 文件按 rootOf 归并到父线程，水印按源会话续传（父/子文件互不覆盖，
    *  并发子 agent 时间窗不互相吞并）。 */
   async function foldLogFile(path: string, minTime: number): Promise<void> {
@@ -513,11 +561,13 @@ export function apply(ctx: AppContext, config: Config): void {
       } catch { offset = end; continue }
       for (const line of text.split('\n')) {
         if (line.trim() === '') continue
-        let ev: { time?: number; type?: string; data?: any } | null = null
+        let ev: SessionEventLike | null = null
         try { ev = JSON.parse(line) } catch { continue }
         if (ev === null) continue
         const t = typeof ev?.time === 'number' ? ev.time : 0
-        if (t <= 0 || t <= cursorAt || t < minTime) continue
+        if (t <= 0 || t < cursorAt || t < minTime) continue
+        const fingerprint = eventFingerprint(sourceId, t, ev)
+        if (fingerprint !== undefined && seenEvents.has(fingerprint)) continue
         const day = dayKeyOf(new Date(t))
         const rec = recordFor(day, threadId)
         const slot = slotOf(new Date(t))
@@ -577,8 +627,10 @@ export function apply(ctx: AppContext, config: Config): void {
           }
           default: break
         }
+        if (fingerprint !== undefined) seenEvents.set(fingerprint, { sourceId, time: t })
       }
       backfillCursor.set(sourceId, Math.max(backfillCursor.get(sourceId) ?? 0, lastTimeIn(text, cursorAt)))
+      pruneSeenEvents(sourceId)
       offset = end
       if (first || (offset & 0x3ffff) === 0) await sleep(0) // 每 ~256KB 让出事件循环
       first = false
@@ -693,20 +745,57 @@ export function apply(ctx: AppContext, config: Config): void {
     return out.sort((a, b) => a.day.localeCompare(b.day))
   }
 
+  function calendarKeysForRange(range: 'day' | 'week' | 'month'): string[] {
+    const today = dayKeyOf(new Date())
+    if (range === 'day') return [today]
+    return calendarDays(today, range === 'week' ? 7 : 30, new Map()).map((item) => item.day)
+  }
+
+  /** 工具的“当前线程”口径：调用 agent 的顶层线程，在所选自然日窗口内聚合，而不是 UI 列表的当日第一行。 */
+  function summarizeThreadForRange(threadId: string, range: 'day' | 'week' | 'month'): {
+    threadId: string; title: string; activeMinutes: number; xianPct: number; activeDays: number
+  } | null {
+    let activeMinutes = 0
+    let xianActive = 0
+    let yangActive = 0
+    let activeDays = 0
+    for (const day of calendarKeysForRange(range)) {
+      const rec = byDay.get(day)?.get(threadId)
+      if (rec === undefined) continue
+      const summary = summarizeThread(rec, titles.get(threadId) ?? shortId(threadId))
+      if (summary.activeMinutes <= 0) continue
+      activeDays++
+      activeMinutes += summary.activeMinutes
+      xianActive += summary.xianActive
+      yangActive += summary.yangActive
+    }
+    if (activeMinutes === 0) return null
+    return {
+      threadId,
+      title: titles.get(threadId) ?? shortId(threadId),
+      activeMinutes,
+      xianPct: (xianActive + yangActive) === 0 ? 0 : xianActive / (xianActive + yangActive),
+      activeDays,
+    }
+  }
+
   function buildRange(range: 'day' | 'week' | 'month', date?: string): unknown {
     const cacheKey = range + '|' + (date ?? '')
     const cached = rangeCache.get(cacheKey)
     if (cached !== undefined && Date.now() - cached.at < 2000) return cached.value
     const all = daySummaries()
+    const ranchByStoredDay = new Map(all.map((item) => [item.day, item.ranch]))
     // day 口径：默认严格今天（无 date 参数时不回退"最新有数据日"——凌晨今天无活动时
     // 不应把昨天数据显示成"今日"）；date 参数指定历史日（有记录用记录，无记录补空）
     let days: Array<{ day: string; ranch: ReturnType<typeof summarizeRanch> }>
     if (range === 'day') {
       const target = (date !== undefined && /^\d{4}-\d{2}-\d{2}$/.test(date)) ? date : dayKeyOf(new Date())
-      const found = all.find((d) => d.day === target)
-      days = found !== undefined ? [found] : [{ day: target, ranch: summarizeRanch(target, []) }]
+      const found = ranchByStoredDay.get(target)
+      days = [{ day: target, ranch: found ?? summarizeRanch(target, []) }]
     } else {
-      days = range === 'week' ? all.slice(-7) : all.slice(-30)
+      // 统计与热力共用固定日历窗口：不能按“最近 N 个活跃日”切片，否则旧记录会混入本周/本月。
+      const keys = calendarKeysForRange(range)
+      days = keys.map((day) => ({ day, ranch: ranchByStoredDay.get(day) ?? summarizeRanch(day, []) }))
     }
     const activeDaysList = days.filter((d) => d.ranch.activeMinutes > 0)
     const activeDays = activeDaysList.length
@@ -944,7 +1033,7 @@ export function apply(ctx: AppContext, config: Config): void {
   // ── 工具 worktime_summary ───────────────────────────────────
   const disposeTool = ctx.tools.register({
     name: 'worktime_summary',
-    description: '牛马时间看板：返回当前线程（或牧场=全部线程）的出勤统计、时间构成与牛马值/境界。range: day|week|month。',
+    description: '牛马时间看板：返回当前调用线程（或 ranch=true 时全部线程）的出勤统计、时间构成与牛马值/境界。range: day|week|month。',
     parameters: {
       type: 'object',
       properties: {
@@ -956,19 +1045,21 @@ export function apply(ctx: AppContext, config: Config): void {
       schema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
       render: (_args: unknown, value: { text: string }): unknown[] => [{ type: 'text', text: value.text }],
     },
-    execute: async (args: { range?: string; ranch?: boolean }): Promise<{ text: string }> => {
+    execute: async (args: { range?: string; ranch?: boolean }, exec?: { agent?: { id?: unknown } }): Promise<{ text: string }> => {
       try {
         const range = args?.range === 'week' || args?.range === 'month' ? args.range : 'day'
         const built = buildRange(range as 'day' | 'week' | 'month') as any
         const o = built.overview
-        const target = args?.ranch === true ? o : built.threads[0] ?? null
+        const callerId = typeof exec?.agent?.id === 'string' ? rootOf(exec.agent.id) : undefined
+        const target = args?.ranch === true ? o : callerId === undefined ? null : summarizeThreadForRange(callerId, range)
+        if (args?.ranch !== true && callerId === undefined) return { text: '无法确定调用线程；请改用 ranch:true 查询全部线程' }
         if (target === null || o.activeMinutes === 0 && args?.ranch === true) return { text: `${range} 无出勤记录` }
         const title = args?.ranch === true ? '牧场' : `线程 ${target.title ?? target.threadId}`
         const xianPct = args?.ranch === true ? o.xianPct : target.xianPct ?? 0
         const activeMin = args?.ranch === true ? o.activeMinutes : target.activeMinutes
         const lines = [
           `【${title} · ${range}】`,
-          `出勤 ${Math.round((activeMin / 60) * 10) / 10} 小时${args?.ranch === true && range !== 'day' ? `（活跃 ${o.activeDays} 天）` : ''}`,
+          `出勤 ${Math.round((activeMin / 60) * 10) / 10} 小时${range !== 'day' ? `（活跃 ${args?.ranch === true ? o.activeDays : target.activeDays} 天）` : ''}`,
         ]
         if (args?.ranch === true) {
           lines.push(`并行峰值 ${o.peakParallel} · 修仙时段 ${Math.round(xianPct * 100)}%`)

@@ -1,8 +1,8 @@
 {
-  "name": "@dsh-external/dsh-worktime-board",
-  "version": "0.1.5",
+  "name": "dsh-worktime-board",
+  "version": "0.1.6",
   "description": "🐂🐴 牛马修仙看板：DeepSeek Harness 工时与修仙值统计面板——日/周/月三档统计 + 学年年历，十二境界修仙体系（炼气→宇宙洪荒）",
-  "private": true,
+  "private": false,
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",
@@ -85,6 +85,6 @@
     "build": "bash scripts/build.sh",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build:client": "tsdown",
-    "test": "node --test test/core.test.mjs"
+    "test": "node --test test/core.test.mjs test/index.integration.test.mjs test/client.test.mjs"
   }
 }
