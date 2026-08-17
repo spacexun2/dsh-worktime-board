@@ -152,8 +152,10 @@ export function apply(ctx: AppContext, config: Config): void {
    *  不被实时事件推进——修复：schema 重建后实时事件不再把水印推到 now 导致回填全跳过）。 */
   const backfillCursor = new Map<string, number>()
   /** 数据 schema 版本：bump 后触发一次全量重建（清空 byDay/cursor → 重扫）。v7：新增 userInputs 维度；v8：新增 humanInputs（人输入）维度；
-   *  v9：无格式变化——触发全量重建以修复 v8 重建时回填水印被实时事件污染导致的历史数据丢失（liveCursor/backfillCursor 分离）。 */
-  const SCHEMA_VERSION = 9
+   *  v9：无格式变化——触发全量重建以修复 v8 重建时回填水印被实时事件污染导致的历史数据丢失（liveCursor/backfillCursor 分离）；
+   *  v10：新增计费输入维度（billedInputTokens/billedInputTokensPerSlot = uncached + cacheRead + cacheWrite，2026-08-17 与 live-stats 对齐）；
+   *  v10 另修复：backfillComplete 后重载间隙漏计（改为增量追平）与重建中止双计（flushPendingLive 推进回填水印）。 */
+  const SCHEMA_VERSION = 10
 
   /** 顶层线程判定：只有 session- 前缀的会话才是顶层线程（子 agent 是裸 uuid）。 */
   const isTopLevel = (id: string): boolean => id.startsWith('session-')
@@ -189,6 +191,8 @@ export function apply(ctx: AppContext, config: Config): void {
   let backfillDone = 0
   let backfillTotal = 0
   let backfillBusy = false
+  /** 上次回填/增量追平完成时间（v10：增量追平只重扫此后改动过的文件，防重载间隙漏计且省扫描）。 */
+  let lastBackfillAt = 0
   /** 重建模式（schema 升级/首次运行）：回填完成前实时事件先入 pendingLive 缓冲，
    *  回填完成后按 backfillCursor 水印过滤放行——防回填与实时重复计数，也防回填跳过未折叠历史。 */
   let rebuildMode = false
@@ -353,6 +357,10 @@ export function apply(ctx: AppContext, config: Config): void {
         if (usage && typeof usage === 'object') {
           const out = typeof usage.outputTokens === 'number' && usage.outputTokens > 0 ? usage.outputTokens : 0
           const inp = typeof usage.inputTokens === 'number' && usage.inputTokens > 0 ? usage.inputTokens : 0
+          // 计费输入 = 未缓存输入 + 缓存命中读/写（与 live-stats billed 口径一致）
+          const cacheRead = typeof usage.cacheReadTokens === 'number' && usage.cacheReadTokens > 0 ? usage.cacheReadTokens : 0
+          const cacheWrite = typeof usage.cacheWriteTokens === 'number' && usage.cacheWriteTokens > 0 ? usage.cacheWriteTokens : 0
+          const billedIn = inp + cacheRead + cacheWrite
           if (out > 0) {
             const next = rec.tokens[slot] + out
             rec.tokens[slot] = next > 0xffffffff ? 0xffffffff : next
@@ -362,6 +370,11 @@ export function apply(ctx: AppContext, config: Config): void {
             rec.inputTokens += inp
             const nextIn = rec.inputTokensPerSlot[slot] + inp
             rec.inputTokensPerSlot[slot] = nextIn > 0xffffffff ? 0xffffffff : nextIn
+          }
+          if (billedIn > 0) {
+            rec.billedInputTokens += billedIn
+            const nextB = rec.billedInputTokensPerSlot[slot] + billedIn
+            rec.billedInputTokensPerSlot[slot] = nextB > 0xffffffff ? 0xffffffff : nextB
           }
         }
         break
@@ -416,20 +429,31 @@ export function apply(ctx: AppContext, config: Config): void {
   })
 
   // ── 历史回填（游标续传 + 限速渐进，幂等） ────────────────────
-  /** 重建模式收尾：回填完成后放行缓冲的实时事件。已被回填覆盖（t ≤ 回填水印）的跳过，防重复计数。 */
+  /** 重建模式收尾：回填完成后放行缓冲的实时事件。已被回填覆盖（t ≤ 回填水印）的跳过，防重复计数；
+   *  v10 修复：被放行折叠的事件同时推进回填水印——重建中止后二次回填（cursor 仍为 0）不会把已折叠事件再计一次。 */
   function flushPendingLive(): void {
     rebuildMode = false
     if (pendingLive.length === 0) return
     const q = pendingLive.splice(0)
     log(`flush pending live events: ${q.length}`)
+    const advanced = new Map<string, number>()
     for (const p of q) {
       if (p.t <= (backfillCursor.get(p.srcId) ?? 0)) continue
       foldLive(p.srcId, p.t, p.event)
+      const cur = advanced.get(p.srcId) ?? 0
+      if (p.t > cur) advanced.set(p.srcId, p.t)
+    }
+    for (const [id, t] of advanced) {
+      const prev = backfillCursor.get(id) ?? 0
+      if (t > prev) backfillCursor.set(id, t)
     }
   }
 
   async function backfill(): Promise<void> {
-    if (backfillBusy || backfillComplete) return
+    // v10：backfillComplete 后不整体跳过——转为增量追平（foldLogFile 按游标幂等，
+    // 重载/重启间隙到达但未被折叠的新事件在此补收；只重扫 lastBackfillAt 后改动过的文件）。
+    if (backfillBusy) return
+    const incremental = backfillComplete
     backfillBusy = true
     try {
       const parentOk = await refreshTitles() // 前置：确保 parentMap 就绪（子 agent 归并依赖）
@@ -437,7 +461,7 @@ export function apply(ctx: AppContext, config: Config): void {
         // parentMap 不可用：中止回填且不置 complete（下次重启/重载可重试），
         // 避免子 agent 历史永久丢失（reviewer 找茬【中】）
         log('backfill aborted: parentMap unavailable (listSessions failed)')
-        flushPendingLive() // 回填未执行：缓冲事件直接放行，防实时统计卡死
+        flushPendingLive() // 回填未执行：缓冲事件直接放行（v10：已推进回填水印，二次回填不会双计）
         return
       }
       const roots: string[] = []
@@ -465,6 +489,7 @@ export function apply(ctx: AppContext, config: Config): void {
       const minTime = Date.now() - config.retentionDays * 86400000
       for (const file of files) {
         if (file.mtime < minTime) { backfillDone++; continue } // 超保留期，跳过
+        if (incremental && file.mtime < lastBackfillAt) { backfillDone++; continue } // 增量：只扫新改动文件
         try {
           await foldLogFile(file.p, minTime)
         } catch (e) {
@@ -474,8 +499,9 @@ export function apply(ctx: AppContext, config: Config): void {
         if (config.backfillFileGapMs > 0) await sleep(config.backfillFileGapMs)
       }
       backfillComplete = true
+      lastBackfillAt = Date.now()
       flush()
-      log(`backfill complete: ${files.length} files`)
+      log(`backfill ${incremental ? 'catch-up' : 'complete'}: ${files.length} files`)
       flushPendingLive() // 回填完成：放行缓冲的实时事件（按回填水印过滤防重复）
     } finally {
       backfillBusy = false
@@ -525,10 +551,17 @@ export function apply(ctx: AppContext, config: Config): void {
             if (usage && typeof usage === 'object') {
               const out = typeof usage.outputTokens === 'number' && usage.outputTokens > 0 ? usage.outputTokens : 0
               const inp = typeof usage.inputTokens === 'number' && usage.inputTokens > 0 ? usage.inputTokens : 0
+              const cacheRead = typeof usage.cacheReadTokens === 'number' && usage.cacheReadTokens > 0 ? usage.cacheReadTokens : 0
+              const cacheWrite = typeof usage.cacheWriteTokens === 'number' && usage.cacheWriteTokens > 0 ? usage.cacheWriteTokens : 0
+              const billedIn = inp + cacheRead + cacheWrite
               if (out > 0) { rec.tokens[slot] = Math.min(0xffffffff, rec.tokens[slot] + out); rec.outputTokens += out }
               if (inp > 0) {
                 rec.inputTokens += inp
                 rec.inputTokensPerSlot[slot] = Math.min(0xffffffff, rec.inputTokensPerSlot[slot] + inp)
+              }
+              if (billedIn > 0) {
+                rec.billedInputTokens += billedIn
+                rec.billedInputTokensPerSlot[slot] = Math.min(0xffffffff, rec.billedInputTokensPerSlot[slot] + billedIn)
               }
             }
             break
@@ -644,6 +677,7 @@ export function apply(ctx: AppContext, config: Config): void {
           target.stepsPerSlot[slot] = Math.min(65535, target.stepsPerSlot[slot] + rec.stepsPerSlot[slot])
           target.tokens[slot] = Math.min(0xffffffff, target.tokens[slot] + rec.tokens[slot])
           target.inputTokensPerSlot[slot] = Math.min(0xffffffff, target.inputTokensPerSlot[slot] + rec.inputTokensPerSlot[slot])
+          target.billedInputTokensPerSlot[slot] = Math.min(0xffffffff, target.billedInputTokensPerSlot[slot] + rec.billedInputTokensPerSlot[slot])
           target.userInputsPerSlot[slot] = Math.min(65535, target.userInputsPerSlot[slot] + rec.userInputsPerSlot[slot])
           target.humanInputsPerSlot[slot] = Math.min(65535, target.humanInputsPerSlot[slot] + rec.humanInputsPerSlot[slot])
         }
@@ -654,6 +688,7 @@ export function apply(ctx: AppContext, config: Config): void {
         target.userInputs += rec.userInputs
         target.humanInputs += rec.humanInputs
         target.inputTokens += rec.inputTokens
+        target.billedInputTokens += rec.billedInputTokens
         target.outputTokens += rec.outputTokens
         dayMap.delete(id)
       }
@@ -717,6 +752,7 @@ export function apply(ctx: AppContext, config: Config): void {
             calls: number
             outputTokens: number
             inputTokens: number
+            uncachedInputTokens: number
             llmMs: number
             toolMs: number
             turns: number
@@ -732,7 +768,7 @@ export function apply(ctx: AppContext, config: Config): void {
               if (row === undefined) {
                 row = {
                   title: s.title,
-                  activeMinutes: 0, calls: 0, outputTokens: 0, inputTokens: 0,
+                  activeMinutes: 0, calls: 0, outputTokens: 0, inputTokens: 0, uncachedInputTokens: 0,
                   llmMs: 0, toolMs: 0, turns: 0, steps: 0,
                   xianActive: 0, yangActive: 0, activeDays: 0,
                 }
@@ -742,6 +778,7 @@ export function apply(ctx: AppContext, config: Config): void {
               row.calls += s.calls
               row.outputTokens += s.outputTokens
               row.inputTokens += s.inputTokens
+              row.uncachedInputTokens += s.uncachedInputTokens
               row.llmMs += s.llmMs
               row.toolMs += s.toolMs
               row.turns += s.turns
@@ -761,6 +798,7 @@ export function apply(ctx: AppContext, config: Config): void {
               calls: row.calls,
               outputTokens: row.outputTokens,
               inputTokens: row.inputTokens,
+              uncachedInputTokens: row.uncachedInputTokens,
               llmMs: row.llmMs,
               toolMs: row.toolMs,
               turns: row.turns,
@@ -789,6 +827,7 @@ export function apply(ctx: AppContext, config: Config): void {
         calls: 0,
         outputTokens: 0,
         inputTokens: 0,
+        uncachedInputTokens: 0,
         llmMs: 0,
         toolMs: 0,
         turns: 0,
@@ -1010,11 +1049,15 @@ export function apply(ctx: AppContext, config: Config): void {
   load()
   void refreshTitles()
   setTimeout(() => { void backfill() }, config.backfillDelayMs)
+  // v10：增量追平定时器——重载/重启间隙未折叠的新事件每 5 分钟补收一次（backfill 增量模式只扫新文件）
+  const CATCHUP_INTERVAL_MS = 5 * 60 * 1000
+  const catchupTimer = setInterval(() => { void backfill() }, CATCHUP_INTERVAL_MS)
   const flushTimer = setInterval(() => { flush() }, Math.max(30000, config.flushSeconds * 1000))
   const titleTimer = setInterval(() => { void refreshTitles() }, 300000)
   ctx.effect(() => () => {
     clearInterval(flushTimer)
     clearInterval(titleTimer)
+    clearInterval(catchupTimer)
     disposeRoute()
     disposeTool()
     flush()

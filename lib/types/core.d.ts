@@ -25,6 +25,7 @@ export interface DayThreadRecord {
     stepsPerSlot: Uint16Array;
     tokens: Uint32Array;
     inputTokensPerSlot: Uint32Array;
+    billedInputTokensPerSlot: Uint32Array;
     userInputsPerSlot: Uint16Array;
     humanInputsPerSlot: Uint16Array;
     llmMs: number;
@@ -34,6 +35,7 @@ export interface DayThreadRecord {
     userInputs: number;
     humanInputs: number;
     inputTokens: number;
+    billedInputTokens: number;
     outputTokens: number;
 }
 export interface SerializedRecord {
@@ -44,6 +46,7 @@ export interface SerializedRecord {
     stepsPerSlot: number[];
     tokens: number[];
     inputTokensPerSlot: number[];
+    billedInputTokensPerSlot: number[];
     userInputsPerSlot: number[];
     humanInputsPerSlot: number[];
     llmMs: number;
@@ -53,6 +56,7 @@ export interface SerializedRecord {
     userInputs: number;
     humanInputs: number;
     inputTokens: number;
+    billedInputTokens: number;
     outputTokens: number;
 }
 export declare function createRecord(day: string, threadId: string): DayThreadRecord;
@@ -84,6 +88,7 @@ export interface ThreadDaySummary {
     calls: number;
     outputTokens: number;
     inputTokens: number;
+    uncachedInputTokens: number;
     llmMs: number;
     toolMs: number;
     turns: number;
@@ -106,6 +111,7 @@ export interface RanchDaySummary {
     threadCount: number;
     calls: number;
     inputTokens: number;
+    uncachedInputTokens: number;
     outputTokens: number;
     llmMs: number;
     toolMs: number;
@@ -138,7 +144,7 @@ export interface RealmResult {
     realm: string;
     dims: RealmDims;
 }
-/** 计分系数（可配置：setRealmCoeffs 运行时覆盖；默认 = 用户定稿：分钟×150、调用×10、步骤×10、输入×150、token 输入÷100 + 输出÷80）。 */
+/** 计分系数（可配置：setRealmCoeffs 运行时覆盖；默认 = 2026-08-17 用户定稿：分钟×150、调用×10、步骤×10、输入×150、token 输入/输出统一 ÷1万）。 */
 export interface RealmCoeffs {
     minutePerMin: number;
     callPts: number;
@@ -152,7 +158,7 @@ export interface RealmCoeffs {
 }
 export declare function setRealmCoeffs(c: Partial<RealmCoeffs>): void;
 export declare function getRealmCoeffs(): RealmCoeffs;
-/** 境界阈值表（下限含；用户定稿变比曲线，不再改）：
+/** 境界阈值表（下限含；用户定稿原始变比曲线，2026-08-17 token ÷1万 后恢复）：
  *  炼气 <50 / 筑基 50-250 / 金丹 250-1250 / 元婴 1250-6250 / 化神 6250-31250 /
  *  炼虚 31250-100000 / 合体 100000-200000 / 大乘 200000-350000 / 渡劫 350000-500000 /
  *  真仙 500000-700000 / 金仙 700000-1000000 / 宇宙洪荒 1000000+ */

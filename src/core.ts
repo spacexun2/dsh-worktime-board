@@ -26,7 +26,8 @@ export interface DayThreadRecord {
   calls: Uint16Array
   stepsPerSlot: Uint16Array // 每槽 step/end 计数（积分制步骤维）
   tokens: Uint32Array // 每槽输出 token 计数
-  inputTokensPerSlot: Uint32Array // 每槽输入 token 计数（积分制 token 维 = 输入+输出）
+  inputTokensPerSlot: Uint32Array // 每槽未缓存输入 token 计数（历史口径，展示/对比用）
+  billedInputTokensPerSlot: Uint32Array // 每槽计费输入 token 计数（= uncached + cacheRead + cacheWrite，主口径/计分用）
   userInputsPerSlot: Uint16Array // 每槽用户输入（user/message）计数（积分制输入次数维）
   humanInputsPerSlot: Uint16Array // 每槽人输入（user/message 且 source.kind==='user'）计数（展示用，不计分）
   llmMs: number
@@ -35,7 +36,8 @@ export interface DayThreadRecord {
   steps: number
   userInputs: number // 用户输入总数（user/message 事件）
   humanInputs: number // 人输入总数（真人 prompt；插件注入/跨会话投递/子 agent 委托不计）
-  inputTokens: number
+  inputTokens: number // 未命中缓存的新输入（uncached，与历史口径一致，展示/对比用）
+  billedInputTokens: number // 计费输入 = uncached + cacheRead + cacheWrite（与 live-stats 对齐的主口径）
   outputTokens: number
 }
 
@@ -47,6 +49,7 @@ export interface SerializedRecord {
   stepsPerSlot: number[]
   tokens: number[]
   inputTokensPerSlot: number[]
+  billedInputTokensPerSlot: number[]
   userInputsPerSlot: number[]
   humanInputsPerSlot: number[]
   llmMs: number
@@ -56,6 +59,7 @@ export interface SerializedRecord {
   userInputs: number
   humanInputs: number
   inputTokens: number
+  billedInputTokens: number
   outputTokens: number
 }
 
@@ -68,6 +72,7 @@ export function createRecord(day: string, threadId: string): DayThreadRecord {
     stepsPerSlot: new Uint16Array(SLOTS_PER_DAY),
     tokens: new Uint32Array(SLOTS_PER_DAY),
     inputTokensPerSlot: new Uint32Array(SLOTS_PER_DAY),
+    billedInputTokensPerSlot: new Uint32Array(SLOTS_PER_DAY),
     userInputsPerSlot: new Uint16Array(SLOTS_PER_DAY),
     humanInputsPerSlot: new Uint16Array(SLOTS_PER_DAY),
     llmMs: 0,
@@ -77,6 +82,7 @@ export function createRecord(day: string, threadId: string): DayThreadRecord {
     userInputs: 0,
     humanInputs: 0,
     inputTokens: 0,
+    billedInputTokens: 0,
     outputTokens: 0,
   }
 }
@@ -151,6 +157,7 @@ export interface ThreadDaySummary {
   calls: number
   outputTokens: number
   inputTokens: number
+  uncachedInputTokens: number // 未命中缓存的新输入（与计费输入对照）
   llmMs: number
   toolMs: number
   turns: number
@@ -178,7 +185,8 @@ export function summarizeThread(rec: DayThreadRecord, title: string): ThreadDayS
     segments: segmentsOf(rec.slots),
     calls,
     outputTokens: rec.outputTokens,
-    inputTokens: rec.inputTokens,
+    inputTokens: rec.billedInputTokens, // 计费输入（主口径）
+    uncachedInputTokens: rec.inputTokens, // 未缓存输入（对照）
     llmMs: rec.llmMs,
     toolMs: rec.toolMs,
     turns: rec.turns,
@@ -201,7 +209,8 @@ export interface RanchDaySummary {
   xianPct: number // 修仙占比（活跃槽中）
   threadCount: number
   calls: number
-  inputTokens: number
+  inputTokens: number // 计费输入（uncached + cacheRead + cacheWrite，主口径）
+  uncachedInputTokens: number // 未命中缓存的新输入
   outputTokens: number
   llmMs: number
   toolMs: number
@@ -232,14 +241,14 @@ export function summarizeRanch(day: string, records: DayThreadRecord[]): RanchDa
   const heatSlots = new Uint32Array(SLOTS_PER_DAY)
   const heatRealm = new Float64Array(SLOTS_PER_DAY)
   let llmMs = 0, toolMs = 0, turns = 0, steps = 0
-  let inputTokens = 0, outputTokens = 0, calls = 0
+  let inputTokens = 0, uncachedInputTokens = 0, outputTokens = 0, calls = 0
   for (const rec of records) {
     orSlots(union, rec.slots)
     for (let slot = 0; slot < SLOTS_PER_DAY; slot++) {
       if (hasSlotBits(rec.slots, slot)) perSlot[slot]++
       heatCalls[slot] += rec.calls[slot]
       heatTokens[slot] += rec.tokens[slot]
-      heatInput[slot] += rec.inputTokensPerSlot[slot]
+      heatInput[slot] += rec.billedInputTokensPerSlot[slot] // 热力输入 = 计费输入（与主口径一致）
       heatSteps[slot] += rec.stepsPerSlot[slot]
       heatInputs[slot] += rec.userInputsPerSlot[slot]
       heatHuman[slot] += rec.humanInputsPerSlot[slot]
@@ -248,7 +257,8 @@ export function summarizeRanch(day: string, records: DayThreadRecord[]): RanchDa
     toolMs += rec.toolMs
     turns += rec.turns
     steps += rec.steps
-    inputTokens += rec.inputTokens
+    uncachedInputTokens += rec.inputTokens
+    inputTokens += rec.billedInputTokens
     outputTokens += rec.outputTokens
     for (let slot = 0; slot < SLOTS_PER_DAY; slot++) calls += rec.calls[slot]
   }
@@ -292,6 +302,7 @@ export function summarizeRanch(day: string, records: DayThreadRecord[]): RanchDa
     threadCount: records.length,
     calls,
     inputTokens,
+    uncachedInputTokens,
     outputTokens,
     llmMs,
     toolMs,
@@ -320,6 +331,7 @@ export function serializeRecord(rec: DayThreadRecord): SerializedRecord {
     stepsPerSlot: Array.from(rec.stepsPerSlot),
     tokens: Array.from(rec.tokens),
     inputTokensPerSlot: Array.from(rec.inputTokensPerSlot),
+    billedInputTokensPerSlot: Array.from(rec.billedInputTokensPerSlot),
     userInputsPerSlot: Array.from(rec.userInputsPerSlot),
     humanInputsPerSlot: Array.from(rec.humanInputsPerSlot),
     llmMs: rec.llmMs,
@@ -329,6 +341,7 @@ export function serializeRecord(rec: DayThreadRecord): SerializedRecord {
     userInputs: rec.userInputs,
     humanInputs: rec.humanInputs,
     inputTokens: rec.inputTokens,
+    billedInputTokens: rec.billedInputTokens,
     outputTokens: rec.outputTokens,
   }
 }
@@ -341,6 +354,7 @@ export function deserializeRecord(s: SerializedRecord): DayThreadRecord {
   rec.stepsPerSlot.set(s.stepsPerSlot.slice(0, SLOTS_PER_DAY))
   rec.tokens.set(s.tokens.slice(0, SLOTS_PER_DAY))
   rec.inputTokensPerSlot.set(s.inputTokensPerSlot.slice(0, SLOTS_PER_DAY))
+  rec.billedInputTokensPerSlot.set((s.billedInputTokensPerSlot ?? []).slice(0, SLOTS_PER_DAY)) // 旧数据无此字段 → 全 0
   rec.userInputsPerSlot.set((s.userInputsPerSlot ?? []).slice(0, SLOTS_PER_DAY)) // 旧数据无此字段 → 全 0
   rec.humanInputsPerSlot.set((s.humanInputsPerSlot ?? []).slice(0, SLOTS_PER_DAY))
   rec.llmMs = s.llmMs
@@ -350,6 +364,7 @@ export function deserializeRecord(s: SerializedRecord): DayThreadRecord {
   rec.userInputs = s.userInputs ?? 0
   rec.humanInputs = s.humanInputs ?? 0
   rec.inputTokens = s.inputTokens
+  rec.billedInputTokens = s.billedInputTokens ?? 0 // 旧数据无此字段 → 0（schema bump 会触发全量重建补齐）
   rec.outputTokens = s.outputTokens
   return rec
 }
@@ -361,7 +376,7 @@ export interface RealmDims {
   calls: number   // 调用分：每调用 × callPts（默认 10）
   steps: number   // 步骤分：每 step × stepPts（默认 10）
   inputs: number  // 输入次数分：每次用户输入 × userInputPts（默认 100）
-  tokens: number  // token 分：输入 ÷ inputTokenDiv + 输出 ÷ outputTokenDiv（默认 100 / 80）
+  tokens: number  // token 分：输入 ÷ inputTokenDiv + 输出 ÷ outputTokenDiv（默认 10000 / 10000）
 }
 
 export interface RealmResult {
@@ -373,14 +388,14 @@ export interface RealmResult {
 /** 修仙槽加成（22:30–06:30，复用 isXianSlot）。 */
 const XIAN_MULT = 1.25
 
-/** 计分系数（可配置：setRealmCoeffs 运行时覆盖；默认 = 用户定稿：分钟×150、调用×10、步骤×10、输入×150、token 输入÷100 + 输出÷80）。 */
+/** 计分系数（可配置：setRealmCoeffs 运行时覆盖；默认 = 2026-08-17 用户定稿：分钟×150、调用×10、步骤×10、输入×150、token 输入/输出统一 ÷1万）。 */
 export interface RealmCoeffs {
   minutePerMin: number  // 每分钟分（每槽 = minutePerMin × 5 分钟）
   callPts: number       // 每调用分
   stepPts: number       // 每 step 分
   userInputPts: number  // 每次用户输入分
-  inputTokenDiv: number // token 分：输入 token ÷ inputTokenDiv（默认 100）
-  outputTokenDiv: number // token 分：输出 token ÷ outputTokenDiv（默认 80）
+  inputTokenDiv: number // token 分：输入 token ÷ inputTokenDiv（默认 10000）
+  outputTokenDiv: number // token 分：输出 token ÷ outputTokenDiv（默认 10000，2026-08-17 用户定稿）
   breakthroughPct: number // 突破奖励：每突破一个境界，送「下一境界门槛 × breakthroughPct」进度分（累计，只升不降）
   breakthroughFailPct: number // 晋升失败率：突破尝试失败回退到本应达到境界的下一级 0% 进度（罚金累计；成功突破后勾销）
   tomatoGrowthPerSeg: number // 入定成长系数：每连续工作 25 分钟（1 段），最终修仙值额外 × (1 + 段数 × tomatoGrowthPerSeg)
@@ -390,8 +405,8 @@ let COEFFS: RealmCoeffs = {
   callPts: 10,
   stepPts: 10,
   userInputPts: 150, // 输入次数×150
-  inputTokenDiv: 100, // 输入 token 每 100 计 1
-  outputTokenDiv: 80, // 输出 token 每 80 计 1
+  inputTokenDiv: 10000, // token 分：输入 token ÷ inputTokenDiv（默认 1 万，2026-08-17 用户定稿）
+  outputTokenDiv: 10000, // token 分：输出 token ÷ outputTokenDiv（默认 1 万，2026-08-17 用户定稿）
   breakthroughPct: 0.05, // 送下一境界门槛的 5%
   breakthroughFailPct: 0.01, // 晋升失败率 1%
   tomatoGrowthPerSeg: 0.1, // 每 25 分钟段成长系数 +0.1
@@ -411,7 +426,7 @@ const REALMS = [
   '炼虚期', '合体期', '大乘期', '渡劫期', '真仙', '金仙', '宇宙洪荒',
 ]
 
-/** 境界阈值表（下限含；用户定稿变比曲线，不再改）：
+/** 境界阈值表（下限含；用户定稿原始变比曲线，2026-08-17 token ÷1万 后恢复）：
  *  炼气 <50 / 筑基 50-250 / 金丹 250-1250 / 元婴 1250-6250 / 化神 6250-31250 /
  *  炼虚 31250-100000 / 合体 100000-200000 / 大乘 200000-350000 / 渡劫 350000-500000 /
  *  真仙 500000-700000 / 金仙 700000-1000000 / 宇宙洪荒 1000000+ */
@@ -463,7 +478,7 @@ export function computeRealm(records: DayThreadRecord[]): RealmResult {
       calls += rec.calls[slot] * COEFFS.callPts * mult
       steps += rec.stepsPerSlot[slot] * COEFFS.stepPts * mult
       inputs += rec.userInputsPerSlot[slot] * COEFFS.userInputPts * mult
-      tokens += (rec.inputTokensPerSlot[slot] / COEFFS.inputTokenDiv + rec.tokens[slot] / COEFFS.outputTokenDiv) * mult
+      tokens += (rec.billedInputTokensPerSlot[slot] / COEFFS.inputTokenDiv + rec.tokens[slot] / COEFFS.outputTokenDiv) * mult
     }
   }
   const value = Math.ceil(minutes + calls + steps + inputs + tokens) // 向上取整（手算样本：7862.5→7863、8836.25→8837）

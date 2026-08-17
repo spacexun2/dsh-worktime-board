@@ -101,40 +101,40 @@ test('summarizeRanch：并集时长/并行峰值/修仙占比/热力', () => {
   assert.equal(r.heatCalls[1], 2)
   assert.equal(r.heatTokens[1], 500)
   assert.equal(r.heatSlots[120], 1)
-  // t7 新增：每槽输入 token + 每槽修行值（默认系数：分钟×150→每槽 750 / 调用 10 / 步骤 10 / 输入 150 / token 输入÷100+输出÷80）
-  assert.equal(r.heatInput[1], 0)              // 未设 inputTokensPerSlot → 0
+  // t7 新增：每槽输入 token + 每槽修行值（默认系数：分钟×150→每槽 750 / 调用 10 / 步骤 10 / 输入 150 / token 输入/输出统一 ÷1万）
+  assert.equal(r.heatInput[1], 0)              // 未设 billedInputTokensPerSlot → 0
   assert.equal(r.heatRealm[0], 937.5)          // 修仙槽：1.25 × 750
-  assert.equal(r.heatRealm[1], 970.3125)       // 修仙槽：1.25 × (750 + 2×10 + 0 + 500/80)
+  assert.equal(r.heatRealm[1], 962.5625)       // 修仙槽：1.25 × (750 + 2×10 + 0 + 500/10000)
   assert.equal(r.heatRealm[120], 750)          // 正常槽：750
   let sumRealm = 0
   for (let i = 0; i < 288; i++) sumRealm += r.heatRealm[i]
-  assert.equal(sumRealm, 2657.8125)            // 937.5 + 970.3125 + 750
+  assert.equal(sumRealm, 2650.0625)            // 937.5 + 962.5625 + 750
   assert.equal(sumRealm, computeRealm([a, b]).dims.minutes + computeRealm([a, b]).dims.calls
     + computeRealm([a, b]).dims.steps + computeRealm([a, b]).dims.inputs + computeRealm([a, b]).dims.tokens) // 与 computeRealm 口径一致
 })
 
-test('summarizeRanch：heatRealm 每槽修行值精确断言（含输入 token/步骤/修仙加成）', () => {
+test('summarizeRanch：heatRealm 每槽修行值精确断言（含计费输入 token/步骤/修仙加成）', () => {
   const rec = createRecord('2026-08-16', 't1')
   setSlot(rec, 0) // 修仙槽
   rec.calls[0] = 4
   rec.stepsPerSlot[0] = 2
   rec.tokens[0] = 8000        // 输出
-  rec.inputTokensPerSlot[0] = 2000 // 输入
+  rec.billedInputTokensPerSlot[0] = 2000 // 计费输入（2026-08-17 主口径）
   const r = summarizeRanch('2026-08-16', [rec])
-  // 已知槽：1.25 × (750 + 4×10 + 2×10 + 2000/100 + 8000/80) = 1.25 × 930 = 1162.5
-  assert.equal(r.heatRealm[0], 1162.5)
+  // 已知槽：1.25 × (750 + 4×10 + 2×10 + 2000/10000 + 8000/10000) = 1.25 × 811 = 1013.75
+  assert.equal(r.heatRealm[0], 1013.75)
   assert.equal(r.heatRealm[1], 0) // 无活动槽 = 0
   assert.equal(r.heatInput[0], 2000)
   assert.equal(r.heatTokens[0], 8000)
-  // 非修仙槽对照：同活动正常槽 → (750 + 40 + 20 + 20 + 100) = 930
+  // 非修仙槽对照：同活动正常槽 → (750 + 40 + 20 + 0.2 + 0.8) = 811
   const yang = createRecord('2026-08-16', 't2')
   setSlot(yang, 78) // 06:30 正常槽
   yang.calls[78] = 4
   yang.stepsPerSlot[78] = 2
   yang.tokens[78] = 8000
-  yang.inputTokensPerSlot[78] = 2000
+  yang.billedInputTokensPerSlot[78] = 2000
   const ry = summarizeRanch('2026-08-16', [yang])
-  assert.equal(ry.heatRealm[78], 930)
+  assert.equal(ry.heatRealm[78], 811)
   // Σ heatRealm === computeRealm dims 和（未 ceil 前）
   const realm = computeRealm([rec])
   let sum = 0
@@ -248,17 +248,17 @@ test('computeRealm 纯基础值（突破奖励不内嵌，可对账）', () => {
   rec.stepsPerSlot[0] = 2
   rec.userInputsPerSlot[0] = 1
   rec.tokens[0] = 8000
-  rec.inputTokensPerSlot[0] = 2000
-  // 1.25 × (750 + 4×10 + 2×10 + 1×150 + 2000/100 + 8000/80) = 1.25 × 1080 = 1350
+  rec.billedInputTokensPerSlot[0] = 2000 // 计费输入（主口径）
+  // 1.25 × (750 + 4×10 + 2×10 + 1×150 + 2000/10000 + 8000/10000) = 1.25 × 961 = 1201.25
   const r = computeRealm([rec])
-  assert.equal(r.value, 1350) // ceil(1350)
+  assert.equal(r.value, 1202) // ceil(1201.25)
   assert.equal(r.dims.minutes, 937.5)
-  assert.equal(r.dims.calls + r.dims.steps + r.dims.inputs + r.dims.tokens, 412.5)
-  // 单日 1350 + 累计奖励(生涯档) = 展示总分（applyBreakthrough 叠加）
-  // 基础 1350 达元婴档(3) → 奖励(3)=12.5+62.5+312.5=387.5 → 1737.5 → ceil 1738
-  const br = applyBreakthrough(1350, 0, 0, () => 1)
+  assert.equal(r.dims.calls + r.dims.steps + r.dims.inputs + r.dims.tokens, 263.75) // 1.25 × (40+20+150+1)
+  // 单日 1202 + 累计奖励(生涯档) = 展示总分（applyBreakthrough 叠加）
+  // 基础 1202 达元婴档(3) → 奖励(3)=12.5+62.5+312.5=387.5 → 1589.5 → ceil 1590
+  const br = applyBreakthrough(1202, 0, 0, () => 1)
   assert.equal(br.tier, 3)
-  assert.equal(br.value, 1738)
+  assert.equal(br.value, 1590)
   assert.equal(br.bonus, 387.5)
 })
 
@@ -300,8 +300,9 @@ test('序列化往返（含 stepsPerSlot）', () => {
   rec.stepsPerSlot[200] = 65535
   rec.tokens[200] = 12345
   rec.inputTokensPerSlot[200] = 45678
+  rec.billedInputTokensPerSlot[200] = 67890
   rec.userInputsPerSlot[3] = 9
-  rec.llmMs = 42; rec.turns = 5; rec.inputTokens = 999; rec.userInputs = 3
+  rec.llmMs = 42; rec.turns = 5; rec.inputTokens = 999; rec.billedInputTokens = 1111; rec.userInputs = 3
   const back = deserializeRecord(serializeRecord(rec))
   assert.equal(back.day, rec.day)
   assert.equal(back.threadId, rec.threadId)
@@ -313,34 +314,39 @@ test('序列化往返（含 stepsPerSlot）', () => {
   assert.equal(back.stepsPerSlot[200], 65535)
   assert.equal(back.tokens[200], 12345)
   assert.equal(back.inputTokensPerSlot[200], 45678)
+  assert.equal(back.billedInputTokensPerSlot[200], 67890)
   assert.equal(back.userInputsPerSlot[3], 9)
   assert.equal(back.llmMs, 42)
   assert.equal(back.turns, 5)
   assert.equal(back.inputTokens, 999)
+  assert.equal(back.billedInputTokens, 1111)
   assert.equal(back.userInputs, 3)
-  // 旧数据无 userInputs 字段 → 反序列化兜底 0
+  // 旧数据无 userInputs / billed 字段 → 反序列化兜底 0
   const legacy = deserializeRecord({
     ...serializeRecord(rec), userInputsPerSlot: undefined, userInputs: undefined,
+    billedInputTokensPerSlot: undefined, billedInputTokens: undefined,
   })
   assert.equal(legacy.userInputs, 0)
   assert.equal(legacy.userInputsPerSlot[3], 0)
+  assert.equal(legacy.billedInputTokens, 0)
+  assert.equal(legacy.billedInputTokensPerSlot[200], 0)
 })
 
-test('牛马值：积分公式（245min/792calls/544steps/输入77.9万+输出62.4万tok 全修仙 → value=82125 炼虚期）', () => {
+test('牛马值：积分公式（245min/792calls/544steps/计费输入77.9万+输出62.4万tok 全修仙 → value=62813 炼虚期）', () => {
   const rec = createRecord('2026-08-16', 't1')
   for (let slot = 0; slot < 49; slot++) setSlot(rec, slot) // 245min = 49 槽，全在修仙段（0-48 < 60）
   rec.calls[0] = 792
   rec.stepsPerSlot[1] = 544
   rec.tokens[2] = 624000        // 输出 token
-  rec.inputTokensPerSlot[2] = 779000 // 输入 token（输入 77.9万 → /100；输出 62.4万 → /80）
+  rec.billedInputTokensPerSlot[2] = 779000 // 计费输入 token（输入 77.9万 /1万；输出 62.4万 /1万）
   const r = computeRealm([rec])
-  // Σ = 1.25 × (49×750 + 7920 + 5440 + 779000/100 + 624000/80) = 1.25 × 65700 = 82125
-  assert.equal(r.value, 82125)
-  assert.equal(r.realm, '炼虚期') // 82125 ∈ [31250, 100000)
+  // Σ = 1.25 × (49×750 + 7920 + 5440 + 779000/10000 + 624000/10000) = 1.25 × 50250.3 = 62812.875
+  assert.equal(r.value, 62813) // ceil(62812.875)
+  assert.equal(r.realm, '炼虚期') // 62813 ∈ [31250, 100000)
   assert.equal(r.dims.minutes, 45937.5) // 49×750×1.25
   assert.equal(r.dims.calls, 9900)      // 792×10×1.25
   assert.equal(r.dims.steps, 6800)      // 544×10×1.25
-  assert.equal(r.dims.tokens, 19487.5)  // (779000/100 + 624000/80)×1.25
+  assert.equal(r.dims.tokens, 175.375)  // (779000/10000 + 624000/10000)×1.25
 })
 
 test('境界映射（变比阈值表，用户定稿；阈值 = [50,250,1250,6250,31250,100000,200000,350000,500000,700000,1000000]）', () => {
@@ -375,8 +381,8 @@ test('修仙加成 1.25 精确断言（同活动修仙/正常槽比值）', () =
   const yang = createRecord('d', 'yang')
   setSlot(xian, 0)   // 00:00 修仙槽
   setSlot(yang, 78)  // 06:30 正常槽
-  xian.calls[0] = 4; xian.stepsPerSlot[0] = 2; xian.tokens[0] = 8000; xian.inputTokensPerSlot[0] = 2000
-  yang.calls[78] = 4; yang.stepsPerSlot[78] = 2; yang.tokens[78] = 8000; yang.inputTokensPerSlot[78] = 2000
+  xian.calls[0] = 4; xian.stepsPerSlot[0] = 2; xian.tokens[0] = 8000; xian.billedInputTokensPerSlot[0] = 2000
+  yang.calls[78] = 4; yang.stepsPerSlot[78] = 2; yang.tokens[78] = 8000; yang.billedInputTokensPerSlot[78] = 2000
   const rx = computeRealm([xian])
   const ry = computeRealm([yang])
   assert.equal(rx.dims.minutes, 937.5)         // 750×1.25
@@ -385,9 +391,9 @@ test('修仙加成 1.25 精确断言（同活动修仙/正常槽比值）', () =
   assert.equal(ry.dims.calls, 40)              // 4×10
   assert.equal(rx.dims.steps, 25)              // 2×10×1.25
   assert.equal(ry.dims.steps, 20)
-  assert.equal(rx.dims.tokens, 150)            // (2000/100 + 8000/80)×1.25
-  assert.equal(ry.dims.tokens, 120)            // 20 + 100
-  assert.equal(rx.value, Math.ceil(ry.value * 1.25)) // 1162.5 vs 930（ceil(1162.5)=1163）
+  assert.equal(rx.dims.tokens, 1.25)           // (2000/10000 + 8000/10000)×1.25
+  assert.equal(ry.dims.tokens, 1)              // 0.2 + 0.8
+  assert.equal(rx.value, Math.ceil(ry.value * 1.25)) // 1013.75 vs 811（ceil(1013.75)=1014）
 })
 
 test('computeRealm：并行线程分钟并集（同槽只计一次，调用/步骤/token 仍 Σ）', () => {
@@ -412,7 +418,7 @@ test('realmForDays：跨天 Σ dims + 空天跳过', () => {
     rec.calls[0] = 792
     rec.stepsPerSlot[1] = 544
     rec.tokens[2] = 624000        // 输出 62.4万
-    rec.inputTokensPerSlot[2] = 779000 // 输入 77.9万（合计 140.3万 → 每 100 = 14030）
+    rec.billedInputTokensPerSlot[2] = 779000 // 计费输入 77.9万（合计 140.3万 → /1万 = 140.3）
     return rec
   }
   const day1 = mk('t1')
@@ -421,40 +427,40 @@ test('realmForDays：跨天 Σ dims + 空天跳过', () => {
   assert.equal(r.dims.minutes, 91875)  // 2 × 45937.5
   assert.equal(r.dims.calls, 19800)    // 2 × 9900
   assert.equal(r.dims.steps, 13600)    // 2 × 6800
-  assert.equal(r.dims.tokens, 38975)   // 2 × 19487.5
-  assert.equal(r.value, 164250)        // 2 × 82125
-  assert.equal(r.realm, '合体期')       // 变比表：164250 ∈ [100000, 200000)
+  assert.equal(r.dims.tokens, 350.75)  // 2 × 175.375
+  assert.equal(r.value, 125626)        // ceil(91875 + 19800 + 13600 + 350.75)
+  assert.equal(r.realm, '合体期')       // 变比表：125626 ∈ [100000, 200000)
   const single = realmForDays([[day1]])
-  assert.equal(single.value, 82125)
-  assert.equal(single.realm, '炼虚期')  // 变比表：82125 ∈ [31250, 100000)
+  assert.equal(single.value, 62813)
+  assert.equal(single.realm, '炼虚期')  // 变比表：62813 ∈ [31250, 100000)
   assert.equal(realmForDays([]).realm, '炼气期') // 空 → 0/炼气期
 })
 
 test('realmAvgForDays：周期活跃日均（Σ dims ÷ 活跃天数，≥1 防除零）', () => {
   const mk = (id) => {
     const rec = createRecord('2026-08-16', id)
-    for (let slot = 0; slot < 49; slot++) setSlot(rec, slot) // 全修仙 49 槽（单日 82125）
+    for (let slot = 0; slot < 49; slot++) setSlot(rec, slot) // 全修仙 49 槽（单日 62813）
     rec.calls[0] = 792
     rec.stepsPerSlot[1] = 544
     rec.tokens[2] = 624000
-    rec.inputTokensPerSlot[2] = 779000
+    rec.billedInputTokensPerSlot[2] = 779000
     return rec
   }
   const day1 = mk('t1')
   const day2 = mk('t2')
-  // 两天满样本 + 空天：活跃 2 天 → 日均 = 82125
+  // 两天满样本 + 空天：活跃 2 天 → 日均 = 62813
   const two = realmAvgForDays([[day1], [], [day2]])
-  assert.equal(two.value, 82125)
+  assert.equal(two.value, 62813)
   assert.equal(two.realm, '炼虚期')
   assert.equal(two.dims.minutes, 45937.5) // 91875 / 2
-  assert.equal(two.dims.tokens, 19487.5)  // 38975 / 2
-  // 单活跃天：日均 = 当日（82125）
+  assert.equal(two.dims.tokens, 175.375)  // 350.75 / 2
+  // 单活跃天：日均 = 当日（62813）
   const one = realmAvgForDays([[day1], []])
-  assert.equal(one.value, 82125)
+  assert.equal(one.value, 62813)
   assert.equal(one.dims.calls, 9900)
   // 三天全活跃：日均不变
   const three = realmAvgForDays([[day1], [day2], [day1]])
-  assert.equal(three.value, 82125)
+  assert.equal(three.value, 62813)
   assert.equal(three.dims.steps, 6800)   // 20400 / 3
   // 空 groups：活跃天数 = 0 → 除数钳 1 → 0 / 炼气期（无 NaN）
   const empty = realmAvgForDays([])

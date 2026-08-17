@@ -17,6 +17,8 @@
 
 看板将活跃时长、模型 token、用户输入和工具调用汇总为修仙值，并通过十二重境界显示累计进度。夜间工作、连续活跃、突破奖励和晋升结果会计入进度。
 
+> **token 口径（v0.1.3）**：「输入」= 计费输入（未命中缓存的 inputTokens + cacheRead + cacheWrite，与官方用量口径一致，含历史缓存命中）；token 计分统一按 1 万 token = 1 分换算。数据来自会话日志每条回复结算的 usage 字段，纯本地，无第三方统计。
+
 <p align="center">
   <img src="assets/day.png" alt="今日修仙值、境界与工时总览" width="402" />
 </p>
