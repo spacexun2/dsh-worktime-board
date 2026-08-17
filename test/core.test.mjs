@@ -11,7 +11,7 @@ import {
   summarizeThread, summarizeRanch,
   serializeRecord, deserializeRecord,
   computeRealm, realmForDays, realmAvgForDays, realmOf, realmTierOf, restTitlePrefix,
-  breakthroughBonus, careerBonus, applyBreakthrough, tomatoSegs, tomatoGrowth,
+  breakthroughBonus, careerBonus, applyBreakthrough, periodSettle, tomatoSegs, tomatoGrowth,
   aggregateRange, calendarDays, calendarRange,
 } from '../src/core.ts'
 
@@ -101,14 +101,14 @@ test('summarizeRanch：并集时长/并行峰值/修仙占比/热力', () => {
   assert.equal(r.heatCalls[1], 2)
   assert.equal(r.heatTokens[1], 500)
   assert.equal(r.heatSlots[120], 1)
-  // t7 新增：每槽输入 token + 每槽修行值（默认系数：分钟×150→每槽 750 / 调用 10 / 步骤 10 / 输入 150 / token 输入/输出统一 ÷1万）
+  // t7 新增：每槽输入 token + 每槽修行值（默认系数：分钟×150→每槽 750 / 调用 15 / 步骤 15 / 输入 150 / token 输入/输出统一 ÷1万；v16 全链路 ×15）
   assert.equal(r.heatInput[1], 0)              // 未设 billedInputTokensPerSlot → 0
-  assert.equal(r.heatRealm[0], 937.5)          // 修仙槽：1.25 × 750
-  assert.equal(r.heatRealm[1], 962.5625)       // 修仙槽：1.25 × (750 + 2×10 + 0 + 500/10000)
-  assert.equal(r.heatRealm[120], 750)          // 正常槽：750
+  assert.equal(r.heatRealm[0], 14062.5)        // 修仙槽：1.25 × 750 × 15
+  assert.equal(r.heatRealm[1], 14625.9375)     // 修仙槽：1.25 × (750 + 2×15 + 0 + 500/10000) × 15
+  assert.equal(r.heatRealm[120], 11250)        // 正常槽：750 × 15
   let sumRealm = 0
   for (let i = 0; i < 288; i++) sumRealm += r.heatRealm[i]
-  assert.equal(sumRealm, 2650.0625)            // 937.5 + 962.5625 + 750
+  assert.equal(sumRealm, 39938.4375)           // (937.5 + 975.0625 + 750) × 15
   assert.equal(sumRealm, computeRealm([a, b]).dims.minutes + computeRealm([a, b]).dims.calls
     + computeRealm([a, b]).dims.steps + computeRealm([a, b]).dims.inputs + computeRealm([a, b]).dims.tokens) // 与 computeRealm 口径一致
 })
@@ -121,12 +121,12 @@ test('summarizeRanch：heatRealm 每槽修行值精确断言（含计费输入 t
   rec.tokens[0] = 8000        // 输出
   rec.billedInputTokensPerSlot[0] = 2000 // 计费输入（2026-08-17 主口径）
   const r = summarizeRanch('2026-08-16', [rec])
-  // 已知槽：1.25 × (750 + 4×10 + 2×10 + 2000/10000 + 8000/10000) = 1.25 × 811 = 1013.75
-  assert.equal(r.heatRealm[0], 1013.75)
+  // 已知槽：1.25 × (750 + 4×15 + 2×15 + 2000/10000 + 8000/10000) × 15 = 1.25 × 841 × 15 = 15768.75
+  assert.equal(r.heatRealm[0], 15768.75)
   assert.equal(r.heatRealm[1], 0) // 无活动槽 = 0
   assert.equal(r.heatInput[0], 2000)
   assert.equal(r.heatTokens[0], 8000)
-  // 非修仙槽对照：同活动正常槽 → (750 + 40 + 20 + 0.2 + 0.8) = 811
+  // 非修仙槽对照：同活动正常槽 → (750 + 60 + 30 + 0.2 + 0.8) × 15 = 841 × 15 = 12615
   const yang = createRecord('2026-08-16', 't2')
   setSlot(yang, 78) // 06:30 正常槽
   yang.calls[78] = 4
@@ -134,7 +134,7 @@ test('summarizeRanch：heatRealm 每槽修行值精确断言（含计费输入 t
   yang.tokens[78] = 8000
   yang.billedInputTokensPerSlot[78] = 2000
   const ry = summarizeRanch('2026-08-16', [yang])
-  assert.equal(ry.heatRealm[78], 811)
+  assert.equal(ry.heatRealm[78], 12615)
   // Σ heatRealm === computeRealm dims 和（未 ceil 前）
   const realm = computeRealm([rec])
   let sum = 0
@@ -143,35 +143,35 @@ test('summarizeRanch：heatRealm 每槽修行值精确断言（含计费输入 t
 })
 
 test('突破奖励：每突破一境界送「下一境界门槛 × 5%」进度分（纯加法，累计只升不降）', () => {
-  // 单次奖励：突破到 tier i 送 THRESHOLDS[i]×5%
-  // tier1 筑基→金丹门槛 250×5%=12.5；tier6 合体→大乘门槛 20万×5%=1万；tier10 金仙→宇宙洪荒 100万×5%=5万；tier11 巅峰 → 0
-  assert.equal(breakthroughBonus(1), 12.5)
-  assert.equal(breakthroughBonus(2), 62.5)    // 元婴门槛 1250×0.05
-  assert.equal(breakthroughBonus(6), 10000)   // 大乘门槛 20万×0.05
-  assert.equal(breakthroughBonus(10), 50000)  // 宇宙洪荒门槛 100万×0.05
+  // 单次奖励：突破到 tier i 送 THRESHOLDS[i]×5%（2026-08-17 v16 表：30/60/90/135/195/270/360/480/630/810/999 万）
+  // tier1 筑基→金丹门槛 60万×5%=30000；tier6 合体→大乘门槛 360万×5%=180000；tier10 金仙→宇宙洪荒 999万×5%=499500；tier11 巅峰 → 0
+  assert.equal(breakthroughBonus(1), 30000)
+  assert.equal(breakthroughBonus(2), 45000)    // 元婴门槛 90万×0.05
+  assert.equal(breakthroughBonus(6), 180000)   // 大乘门槛 360万×0.05
+  assert.equal(breakthroughBonus(10), 499500)  // 宇宙洪荒门槛 999万×0.05
   assert.equal(breakthroughBonus(11), 0)
-  // 累计：生涯到金仙(10) = 12.5+62.5+312.5+1562.5+5000+10000+17500+25000+35000+50000 = 144450
-  assert.equal(careerBonus(1), 12.5)
-  assert.equal(careerBonus(10), 144450)
-  // rng 恒 1 → 永不失败（存量豁免场景）：基础值 29.5 万（大乘档 7）→ 奖励(7)=34450 → 329450 仍大乘（<35万 不连锁）
+  // 累计：生涯到金仙(10) = 30000+45000+67500+97500+135000+180000+240000+315000+405000+499500 = 2014500
+  assert.equal(careerBonus(1), 30000)
+  assert.equal(careerBonus(10), 2014500)
+  // rng 恒 1 → 永不失败：基础值 442.5 万（=29.5万×15）→ 连锁到渡劫(8) → 奖励(8)=1110000 → 5535000（<630万 不升真仙）
   const ok = () => 1
-  const r = applyBreakthrough(295000, 0, 0, ok)
-  assert.equal(r.tier, 7)
-  assert.equal(r.bonus, 34450)
-  assert.equal(r.value, 329450)
+  const r = applyBreakthrough(4425000, 0, 0, ok)
+  assert.equal(r.tier, 8)
+  assert.equal(r.bonus, 1110000)
+  assert.equal(r.value, 5535000)
   assert.equal(r.failed, false)
-  // 生涯已是 7：基础 30 万 → 奖励(7) 34450 → 334450 大乘（不再连锁，tier 保持 7）
-  const r2 = applyBreakthrough(300000, 7, 0, ok)
-  assert.equal(r2.tier, 7)
-  assert.equal(r2.value, 334450)
-  // 基础值 60 万 + 奖励(9) 94450 = 694450 → 真仙(9)（<70万 不升金仙）
-  const r3 = applyBreakthrough(600000, 0, 0, ok)
-  assert.equal(r3.tier, 9)
-  assert.equal(r3.value, Math.ceil(600000 + careerBonus(9)))
-  // 基础值 100 万 + 奖励(10) 144450 → 宇宙洪荒(11)
-  const r4 = applyBreakthrough(1000000, 0, 0, ok)
+  // 生涯已是 7：基础 450 万 → 奖励(7) 795000 → 5610000 ≥ 480万 → 连锁到 8（<630万 停）
+  const r2 = applyBreakthrough(4500000, 7, 0, ok)
+  assert.equal(r2.tier, 8)
+  assert.equal(r2.value, 5610000)
+  // 基础值 900 万 → 全连锁到宇宙洪荒(11)，奖励 2014500 → 11014500
+  const r3 = applyBreakthrough(9000000, 0, 0, ok)
+  assert.equal(r3.tier, 11)
+  assert.equal(r3.value, 11014500)
+  // 基础值 1500 万 → 宇宙洪荒(11)
+  const r4 = applyBreakthrough(15000000, 0, 0, ok)
   assert.equal(r4.tier, 11)
-  assert.equal(r4.value, Math.ceil(1000000 + careerBonus(10)))
+  assert.equal(r4.value, 17014500)
   // 零基础 → 炼气 无奖励
   const r0 = applyBreakthrough(0, 0, 0, ok)
   assert.equal(r0.tier, 0)
@@ -181,46 +181,74 @@ test('突破奖励：每突破一境界送「下一境界门槛 × 5%」进度�
 
 test('applyBreakthrough maxSteps=1（2026-08-17 一天一结算：单次结算最多突破 1 档）', () => {
   const ok = () => 1
-  // 基础 29.5 万本可连锁 7 档；maxSteps=1 只推进 1 档（生涯 0 → 1 筑基）
-  const r = applyBreakthrough(295000, 0, 0, ok, 1)
+  // 基础 442.5 万本可连锁 8 档；maxSteps=1 只推进 1 档（生涯 0 → 1 筑基）
+  const r = applyBreakthrough(4425000, 0, 0, ok, 1)
   assert.equal(r.tier, 1)
-  assert.equal(r.bonus, 12.5)             // 仅筑基门槛奖励（金丹门槛 250×5%）
-  assert.equal(r.value, 295013)           // ceil(295000 + 12.5)
-  // 生涯 7 起步：基础 36 万 + 奖励 34450 = 394450 ≥ 35万门槛 → 只进 1 档（8 渡劫），不再连锁到 9
-  const r2 = applyBreakthrough(360000, 7, 0, ok, 1)
+  assert.equal(r.bonus, 30000)             // 仅筑基门槛奖励（金丹门槛 60万×5%）
+  assert.equal(r.value, 4455000)           // 4425000 + 30000
+  // 生涯 7 起步：基础 540 万 + 奖励 795000 = 6195000 ≥ 480万门槛 → 只进 1 档（8 渡劫）
+  const r2 = applyBreakthrough(5400000, 7, 0, ok, 1)
   assert.equal(r2.tier, 8)
-  assert.equal(r2.bonus, careerBonus(8))
-  assert.equal(r2.value, 360000 + careerBonus(8))
+  assert.equal(r2.bonus, 1110000)
+  assert.equal(r2.value, 6510000)
   // 未达下一门槛：不动
-  const r3 = applyBreakthrough(1000, 2, 0, ok, 1)
+  const r3 = applyBreakthrough(15000, 2, 0, ok, 1)
   assert.equal(r3.tier, 2)
-  assert.equal(r3.value, 1000 + careerBonus(2))
-  // 失败路径受 maxSteps 约束：基础 36 万、生涯 7、必失败 → 本应 8 的下一级 = 7（大乘 0% 进度）
+  assert.equal(r3.value, 15000 + careerBonus(2))
+  // 失败路径受 maxSteps 约束：基础 1200 万、生涯 7（12795000 ≥ 480万 → 本应 8），必失败 → 回退 7（大乘 0% 进度）
   const fail = () => 0
-  const rf = applyBreakthrough(360000, 7, 0, fail, 1)
+  const rf = applyBreakthrough(12000000, 7, 0, fail, 1)
   assert.equal(rf.failed, true)
   assert.equal(rf.tier, 7)
-  assert.equal(rf.value, 200000) // 大乘门槛 20 万
+  assert.equal(rf.value, 3600000) // 大乘门槛 360 万
+})
+
+test('periodSettle：突破奖励按周期独立结算（v12/v16，突破次数=最终境界档位）', () => {
+  // 基础 442.5 万（growth 1）→ 最终 5535000 渡劫档（8）→ 突破 8 次，奖励 careerBonus(8)
+  const s = periodSettle(4425000)
+  assert.equal(s.tier, 8)
+  assert.equal(s.bonus, careerBonus(8))
+  // 15000 → 炼气档（0，低于筑基门槛 30 万）
+  const s2 = periodSettle(15000)
+  assert.equal(s2.tier, 0)
+  assert.equal(s2.bonus, 0)
+  // 180 万 → 炼虚档（5）
+  const s3 = periodSettle(1800000)
+  assert.equal(s3.tier, 5)
+  assert.equal(s3.bonus, careerBonus(5))
+  // 昨日场景：基础 585 万（39万×15）× 成长 2.3 → 奖励迭代推升 → 宇宙洪荒档（11）= 突破 11 次（炼气→宇宙洪荒）
+  const s4 = periodSettle(5850000, 2.3)
+  assert.equal(s4.tier, 11)
+  assert.equal(s4.bonus, careerBonus(11))
+  // 零/负基础 → 无奖励
+  const s0 = periodSettle(0)
+  assert.equal(s0.tier, 0)
+  assert.equal(s0.bonus, 0)
+  // 顶部钳制
+  const top = periodSettle(1e9)
+  assert.equal(top.tier, 11)
 })
 
 test('晋升失败：回退到本应晋升最高境界的下一级 0% 进度（只退一级）', () => {
   const fail = () => 0 // rng 恒 0 → 必失败
-  // 连升多级失败（大乘 7 起步，基础 36 万 → 无失败连锁到渡劫 8）：失败回退 7（大乘）0% 进度 = 20 万门槛，只退一级
-  const r = applyBreakthrough(360000, 7, 0, fail)
+  // 连锁失败（大乘 7 起步，基础 1200 万 + 奖励 795000 = 12795000 → 连锁到宇宙洪荒 11）：失败回退 10（金仙）0% 进度 = 810 万门槛，只退一级
+  const r = applyBreakthrough(12000000, 7, 0, fail)
   assert.equal(r.failed, true)
-  assert.equal(r.tier, 7) // 本应 8 的下一级 = 7
-  assert.equal(r.value, 200000) // 大乘期 0% 进度 = 门槛 20 万
-  assert.ok(r.failPenalty > 0)
-  // 单级晋升失败（真仙 9 → 基础 72 万 + 奖励 94437.5 = 814437.5 连锁到金仙 10）：失败回退 9（真仙）0% 进度
-  const r1 = applyBreakthrough(720000, 9, 0, fail)
+  assert.equal(r.tier, 10) // 本应 11 的下一级 = 10
+  assert.equal(r.value, 8100000) // 金仙期 0% 进度 = 门槛 810 万
+  assert.equal(Math.round(r.failPenalty), 5914500)
+  // 真仙 9 起步，基础 1080 万 → 连锁到 11，失败回退 10
+  const r1 = applyBreakthrough(10800000, 9, 0, fail)
   assert.equal(r1.failed, true)
-  assert.equal(r1.tier, 9) // 本应 10 的下一级 = 9
-  assert.equal(r1.value, 500000) // 真仙期 0% 进度 = 门槛 50 万
-  // 失败后带罚金重试：rng 恒 1 → 成功晋升且罚金勾销（基础 80 万 + 奖励 − 罚金 194450 → 750000 金仙 10）
-  const r3 = applyBreakthrough(800000, 7, r.failPenalty, () => 1)
+  assert.equal(r1.tier, 10)
+  assert.equal(r1.value, 8100000)
+  assert.equal(Math.round(r1.failPenalty), 4714500)
+  // 失败后带罚金重试：rng 恒 1 → 罚金勾销，连锁到宇宙洪荒
+  const r3 = applyBreakthrough(12000000, 7, r.failPenalty, () => 1)
   assert.equal(r3.failed, false)
-  assert.equal(r3.tier, 10) // 80万+144450−194450 = 750000 < 100万 → 金仙
+  assert.equal(r3.tier, 11)
   assert.equal(r3.failPenalty, 0)
+  assert.equal(r3.value, 14014500)
 })
 
 test('入定段数 + 成长系数：每连续 25 分钟 1 段（允许断 1 槽），成长系数 = 1 + 段数 × 0.1（最终额外乘）', () => {
@@ -273,27 +301,27 @@ test('computeRealm 纯基础值（突破奖励不内嵌，可对账）', () => {
   rec.userInputsPerSlot[0] = 1
   rec.tokens[0] = 8000
   rec.billedInputTokensPerSlot[0] = 2000 // 计费输入（主口径）
-  // 1.25 × (750 + 4×10 + 2×10 + 1×150 + 2000/10000 + 8000/10000) = 1.25 × 961 = 1201.25
+  // 1.25 × (750 + 4×15 + 2×15 + 1×150 + 2000/10000 + 8000/10000) × 15 = 1.25 × 991 × 15 = 18581.25
   const r = computeRealm([rec])
-  assert.equal(r.value, 1202) // ceil(1201.25)
-  assert.equal(r.dims.minutes, 937.5)
-  assert.equal(r.dims.calls + r.dims.steps + r.dims.inputs + r.dims.tokens, 263.75) // 1.25 × (40+20+150+1)
-  // 单日 1202 + 累计奖励(生涯档) = 展示总分（applyBreakthrough 叠加）
-  // 基础 1202 达元婴档(3) → 奖励(3)=12.5+62.5+312.5=387.5 → 1589.5 → ceil 1590
-  const br = applyBreakthrough(1202, 0, 0, () => 1)
-  assert.equal(br.tier, 3)
-  assert.equal(br.value, 1590)
-  assert.equal(br.bonus, 387.5)
+  assert.equal(r.value, 18582) // ceil(18581.25)
+  assert.equal(r.dims.minutes, 14062.5) // 937.5 × 15
+  assert.equal(r.dims.calls + r.dims.steps + r.dims.inputs + r.dims.tokens, 4518.75) // 1.25 × (60+30+150+1) × 15
+  // 单日 18582 + 累计奖励(生涯档) = 展示总分（applyBreakthrough 叠加）
+  // 基础 18582 < 筑基门槛 30万 → 无突破（tier 0，奖励 0）
+  const br = applyBreakthrough(18582, 0, 0, () => 1)
+  assert.equal(br.tier, 0)
+  assert.equal(br.value, 18582)
+  assert.equal(br.bonus, 0)
 })
 
 test('realmTierOf：境界档位（成长里程碑用）', () => {
-  assert.equal(realmTierOf(0), 0)       // 炼气
-  assert.equal(realmTierOf(49), 0)
-  assert.equal(realmTierOf(50), 1)      // 筑基
-  assert.equal(realmTierOf(250), 2)     // 金丹
-  assert.equal(realmTierOf(100000), 6)  // 合体
-  assert.equal(realmTierOf(1000000), 11) // 宇宙洪荒
-  assert.equal(realmTierOf(1e15), 11)   // 顶部钳制
+  assert.equal(realmTierOf(0), 0)          // 炼气
+  assert.equal(realmTierOf(299999), 0)
+  assert.equal(realmTierOf(300000), 1)     // 筑基
+  assert.equal(realmTierOf(600000), 2)     // 金丹
+  assert.equal(realmTierOf(8100000), 10)   // 金仙
+  assert.equal(realmTierOf(9990000), 11)   // 宇宙洪荒
+  assert.equal(realmTierOf(1e15), 11)      // 顶部钳制
 })
 
 test('用户输入次数计分（userInputs × 150，修仙槽 ×1.25）', () => {
@@ -301,19 +329,19 @@ test('用户输入次数计分（userInputs × 150，修仙槽 ×1.25）', () =>
   setSlot(rec, 0) // 修仙槽
   rec.userInputsPerSlot[0] = 2 // 2 次用户输入
   const r = computeRealm([rec])
-  // 分钟 750×1.25 + 输入 2×150×1.25 = 937.5 + 375 = 1312.5
-  assert.equal(r.dims.inputs, 375)
-  assert.equal(r.value, 1313) // ceil(1312.5)
+  // 分钟 750×1.25 + 输入 2×150×1.25 = 937.5 + 375 = 1312.5（×15 = 19687.5）
+  assert.equal(r.dims.inputs, 5625) // 375 × 15
+  assert.equal(r.value, 19688) // ceil(19687.5)
   const s = summarizeRanch('2026-08-16', [rec])
   assert.equal(s.userInputs, 2)
-  // heatRealm 口径一致：1.25 × (750 + 2×150) = 1312.5
-  assert.equal(s.heatRealm[0], 1312.5)
-  // 正常槽对照：750 + 2×150 = 1050
+  // heatRealm 口径一致：1.25 × (750 + 2×150) × 15 = 19687.5
+  assert.equal(s.heatRealm[0], 19687.5)
+  // 正常槽对照：(750 + 2×150) × 15 = 15750
   const yang = createRecord('2026-08-16', 't2')
   setSlot(yang, 78)
   yang.userInputsPerSlot[78] = 2
   const ry = summarizeRanch('2026-08-16', [yang])
-  assert.equal(ry.heatRealm[78], 1050)
+  assert.equal(ry.heatRealm[78], 15750)
 })
 
 test('序列化往返（含 stepsPerSlot）', () => {
@@ -356,7 +384,7 @@ test('序列化往返（含 stepsPerSlot）', () => {
   assert.equal(legacy.billedInputTokensPerSlot[200], 0)
 })
 
-test('牛马值：积分公式（245min/792calls/544steps/计费输入77.9万+输出62.4万tok 全修仙 → value=62813 炼虚期）', () => {
+test('牛马值：积分公式（245min/792calls/544steps/计费输入77.9万+输出62.4万tok 全修仙 → value=1067444 元婴期）', () => {
   const rec = createRecord('2026-08-16', 't1')
   for (let slot = 0; slot < 49; slot++) setSlot(rec, slot) // 245min = 49 槽，全在修仙段（0-48 < 60）
   rec.calls[0] = 792
@@ -364,40 +392,40 @@ test('牛马值：积分公式（245min/792calls/544steps/计费输入77.9万+�
   rec.tokens[2] = 624000        // 输出 token
   rec.billedInputTokensPerSlot[2] = 779000 // 计费输入 token（输入 77.9万 /1万；输出 62.4万 /1万）
   const r = computeRealm([rec])
-  // Σ = 1.25 × (49×750 + 7920 + 5440 + 779000/10000 + 624000/10000) = 1.25 × 50250.3 = 62812.875
-  assert.equal(r.value, 62813) // ceil(62812.875)
-  assert.equal(r.realm, '炼虚期') // 62813 ∈ [31250, 100000)
-  assert.equal(r.dims.minutes, 45937.5) // 49×750×1.25
-  assert.equal(r.dims.calls, 9900)      // 792×10×1.25
-  assert.equal(r.dims.steps, 6800)      // 544×10×1.25
-  assert.equal(r.dims.tokens, 175.375)  // (779000/10000 + 624000/10000)×1.25
+  // Σ = 1.25 × (49×750 + 792×15 + 544×15 + 779000/10000 + 624000/10000) × 15 = 1.25 × 56930.3 × 15 = 1067443.125
+  assert.equal(r.value, 1067444) // ceil(1067443.125)
+  assert.equal(r.realm, '元婴期') // 1067444 ∈ [900000, 1350000)
+  assert.equal(r.dims.minutes, 689062.5) // 45937.5 × 15
+  assert.equal(r.dims.calls, 222750)     // 792×15×1.25×15
+  assert.equal(r.dims.steps, 153000)     // 544×15×1.25×15
+  assert.equal(r.dims.tokens, 2630.625)  // (779000/10000 + 624000/10000)×1.25×15
 })
 
-test('境界映射（变比阈值表，用户定稿；阈值 = [50,250,1250,6250,31250,100000,200000,350000,500000,700000,1000000]）', () => {
+test('境界映射（2026-08-17 v16；阈值 = [30,60,90,135,195,270,360,480,630,810,999] 万）', () => {
   assert.equal(realmOf(0), '炼气期')
-  assert.equal(realmOf(49), '炼气期')
-  assert.equal(realmOf(50), '筑基期')
-  assert.equal(realmOf(249), '筑基期')
-  assert.equal(realmOf(250), '金丹期')
-  assert.equal(realmOf(1249), '金丹期')
-  assert.equal(realmOf(1250), '元婴期')
-  assert.equal(realmOf(6249), '元婴期')
-  assert.equal(realmOf(6250), '化神期')
-  assert.equal(realmOf(31249), '化神期')
-  assert.equal(realmOf(31250), '炼虚期')
-  assert.equal(realmOf(99999), '炼虚期')
-  assert.equal(realmOf(100000), '合体期')
-  assert.equal(realmOf(199999), '合体期')
-  assert.equal(realmOf(200000), '大乘期')
-  assert.equal(realmOf(349999), '大乘期')
-  assert.equal(realmOf(350000), '渡劫期')
-  assert.equal(realmOf(499999), '渡劫期')
-  assert.equal(realmOf(500000), '真仙')
-  assert.equal(realmOf(699999), '真仙')
-  assert.equal(realmOf(700000), '金仙')
-  assert.equal(realmOf(999999), '金仙')
-  assert.equal(realmOf(1000000), '宇宙洪荒')
-  assert.equal(realmOf(1e15), '宇宙洪荒') // 顶部钳制
+  assert.equal(realmOf(299999), '炼气期')
+  assert.equal(realmOf(300000), '筑基期')
+  assert.equal(realmOf(599999), '筑基期')
+  assert.equal(realmOf(600000), '金丹期')
+  assert.equal(realmOf(899999), '金丹期')
+  assert.equal(realmOf(900000), '元婴期')
+  assert.equal(realmOf(1349999), '元婴期')
+  assert.equal(realmOf(1350000), '化神期')
+  assert.equal(realmOf(1949999), '化神期')
+  assert.equal(realmOf(1950000), '炼虚期')
+  assert.equal(realmOf(2699999), '炼虚期')
+  assert.equal(realmOf(2700000), '合体期')
+  assert.equal(realmOf(3599999), '合体期')
+  assert.equal(realmOf(3600000), '大乘期')
+  assert.equal(realmOf(4799999), '大乘期')
+  assert.equal(realmOf(4800000), '渡劫期')
+  assert.equal(realmOf(6299999), '渡劫期')
+  assert.equal(realmOf(6300000), '真仙')
+  assert.equal(realmOf(8099999), '真仙')
+  assert.equal(realmOf(8100000), '金仙')
+  assert.equal(realmOf(9989999), '金仙')
+  assert.equal(realmOf(9990000), '宇宙洪荒')
+  assert.equal(realmOf(1e9), '宇宙洪荒') // 顶部钳制
 })
 
 test('修仙加成 1.25 精确断言（同活动修仙/正常槽比值）', () => {
@@ -409,15 +437,15 @@ test('修仙加成 1.25 精确断言（同活动修仙/正常槽比值）', () =
   yang.calls[78] = 4; yang.stepsPerSlot[78] = 2; yang.tokens[78] = 8000; yang.billedInputTokensPerSlot[78] = 2000
   const rx = computeRealm([xian])
   const ry = computeRealm([yang])
-  assert.equal(rx.dims.minutes, 937.5)         // 750×1.25
-  assert.equal(ry.dims.minutes, 750)
-  assert.equal(rx.dims.calls, 50)              // 4×10×1.25
-  assert.equal(ry.dims.calls, 40)              // 4×10
-  assert.equal(rx.dims.steps, 25)              // 2×10×1.25
-  assert.equal(ry.dims.steps, 20)
-  assert.equal(rx.dims.tokens, 1.25)           // (2000/10000 + 8000/10000)×1.25
-  assert.equal(ry.dims.tokens, 1)              // 0.2 + 0.8
-  assert.equal(rx.value, Math.ceil(ry.value * 1.25)) // 1013.75 vs 811（ceil(1013.75)=1014）
+  assert.equal(rx.dims.minutes, 14062.5)        // 750×1.25×15
+  assert.equal(ry.dims.minutes, 11250)          // 750×15
+  assert.equal(rx.dims.calls, 1125)             // 4×15×1.25×15
+  assert.equal(ry.dims.calls, 900)              // 4×15×15
+  assert.equal(rx.dims.steps, 562.5)            // 2×15×1.25×15
+  assert.equal(ry.dims.steps, 450)              // 2×15×15
+  assert.equal(rx.dims.tokens, 18.75)          // (2000/10000 + 8000/10000)×1.25×15
+  assert.equal(ry.dims.tokens, 15)             // (0.2 + 0.8)×15
+  assert.equal(rx.value, Math.ceil(ry.value * 1.25)) // 15768.75 vs 12615（ceil(15768.75)=15769）
 })
 
 test('computeRealm：并行线程分钟并集（同槽只计一次，调用/步骤/token 仍 Σ）', () => {
@@ -429,10 +457,10 @@ test('computeRealm：并行线程分钟并集（同槽只计一次，调用/步�
   b.calls[78] = 5
   b.stepsPerSlot[78] = 2
   const r = computeRealm([a, b])
-  assert.equal(r.dims.minutes, 750) // 并集：同槽只计一次（非 1500）；78 为正常槽无加成
-  assert.equal(r.dims.calls, 80)    // (3+5)×10
-  assert.equal(r.dims.steps, 20)    // 2×10
-  assert.equal(r.value, 850)        // ceil(750+80+20)
+  assert.equal(r.dims.minutes, 11250) // 并集：同槽只计一次（750×15）；78 为正常槽无加成
+  assert.equal(r.dims.calls, 1800)    // (3+5)×15×15
+  assert.equal(r.dims.steps, 450)     // 2×15×15
+  assert.equal(r.value, 13500)        // ceil((750+120+30)×15)
 })
 
 test('realmForDays：跨天 Σ dims + 空天跳过', () => {
@@ -448,22 +476,22 @@ test('realmForDays：跨天 Σ dims + 空天跳过', () => {
   const day1 = mk('t1')
   const day2 = mk('t2')
   const r = realmForDays([[day1], [], [day2]]) // 中间空天应跳过
-  assert.equal(r.dims.minutes, 91875)  // 2 × 45937.5
-  assert.equal(r.dims.calls, 19800)    // 2 × 9900
-  assert.equal(r.dims.steps, 13600)    // 2 × 6800
-  assert.equal(r.dims.tokens, 350.75)  // 2 × 175.375
-  assert.equal(r.value, 125626)        // ceil(91875 + 19800 + 13600 + 350.75)
-  assert.equal(r.realm, '合体期')       // 变比表：125626 ∈ [100000, 200000)
+  assert.equal(r.dims.minutes, 1378125)  // 2 × 689062.5
+  assert.equal(r.dims.calls, 445500)     // 2 × 222750
+  assert.equal(r.dims.steps, 306000)     // 2 × 153000
+  assert.equal(r.dims.tokens, 5261.25)   // 2 × 2630.625
+  assert.equal(r.value, 2134887)         // ceil((91875 + 29700 + 20400 + 350.75) × 15)
+  assert.equal(r.realm, '炼虚期')         // v16 表：2134887 ∈ [1950000, 2700000)
   const single = realmForDays([[day1]])
-  assert.equal(single.value, 62813)
-  assert.equal(single.realm, '炼虚期')  // 变比表：62813 ∈ [31250, 100000)
+  assert.equal(single.value, 1067444)
+  assert.equal(single.realm, '元婴期')    // v16 表：1067444 ∈ [900000, 1350000)
   assert.equal(realmForDays([]).realm, '炼气期') // 空 → 0/炼气期
 })
 
 test('realmAvgForDays：周期活跃日均（Σ dims ÷ 活跃天数，≥1 防除零）', () => {
   const mk = (id) => {
     const rec = createRecord('2026-08-16', id)
-    for (let slot = 0; slot < 49; slot++) setSlot(rec, slot) // 全修仙 49 槽（单日 62813）
+    for (let slot = 0; slot < 49; slot++) setSlot(rec, slot) // 全修仙 49 槽（单日 1067444）
     rec.calls[0] = 792
     rec.stepsPerSlot[1] = 544
     rec.tokens[2] = 624000
@@ -472,20 +500,20 @@ test('realmAvgForDays：周期活跃日均（Σ dims ÷ 活跃天数，≥1 防�
   }
   const day1 = mk('t1')
   const day2 = mk('t2')
-  // 两天满样本 + 空天：活跃 2 天 → 日均 = 62813
+  // 两天满样本 + 空天：活跃 2 天 → 日均 = 1067444
   const two = realmAvgForDays([[day1], [], [day2]])
-  assert.equal(two.value, 62813)
-  assert.equal(two.realm, '炼虚期')
-  assert.equal(two.dims.minutes, 45937.5) // 91875 / 2
-  assert.equal(two.dims.tokens, 175.375)  // 350.75 / 2
-  // 单活跃天：日均 = 当日（62813）
+  assert.equal(two.value, 1067444)
+  assert.equal(two.realm, '元婴期')     // v16 表：1067444 ∈ [900000, 1350000)
+  assert.equal(two.dims.minutes, 689062.5) // 1378125 / 2
+  assert.equal(two.dims.tokens, 2630.625)  // 5261.25 / 2
+  // 单活跃天：日均 = 当日（1067444）
   const one = realmAvgForDays([[day1], []])
-  assert.equal(one.value, 62813)
-  assert.equal(one.dims.calls, 9900)
+  assert.equal(one.value, 1067444)
+  assert.equal(one.dims.calls, 222750)
   // 三天全活跃：日均不变
   const three = realmAvgForDays([[day1], [day2], [day1]])
-  assert.equal(three.value, 62813)
-  assert.equal(three.dims.steps, 6800)   // 20400 / 3
+  assert.equal(three.value, 1067444)
+  assert.equal(three.dims.steps, 153000)  // 459000 / 3
   // 空 groups：活跃天数 = 0 → 除数钳 1 → 0 / 炼气期（无 NaN）
   const empty = realmAvgForDays([])
   assert.equal(empty.value, 0)

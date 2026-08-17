@@ -144,7 +144,9 @@ export interface RealmResult {
     realm: string;
     dims: RealmDims;
 }
-/** 计分系数（可配置：setRealmCoeffs 运行时覆盖；默认 = 2026-08-17 用户定稿：分钟×150、调用×10、步骤×10、输入×150、token 输入/输出统一 ÷1万）。 */
+/** 修仙值展示尺度（2026-08-17 用户定稿 ×15）：分值/热力/阈值整体 ×15，比例与境界节奏不变，数字更顺眼。 */
+export declare const SCORE_SCALE = 15;
+/** 计分系数（可配置：setRealmCoeffs 运行时覆盖；默认 = 2026-08-17 用户定稿：分钟×150、调用×15、步骤×15、输入×150、token 输入/输出统一 ÷1万）。 */
 export interface RealmCoeffs {
     minutePerMin: number;
     callPts: number;
@@ -158,16 +160,15 @@ export interface RealmCoeffs {
 }
 export declare function setRealmCoeffs(c: Partial<RealmCoeffs>): void;
 export declare function getRealmCoeffs(): RealmCoeffs;
-/** 境界阈值表（下限含；用户定稿原始变比曲线，2026-08-17 token ÷1万 后恢复）：
- *  炼气 <50 / 筑基 50-250 / 金丹 250-1250 / 元婴 1250-6250 / 化神 6250-31250 /
- *  炼虚 31250-100000 / 合体 100000-200000 / 大乘 200000-350000 / 渡劫 350000-500000 /
- *  真仙 500000-700000 / 金仙 700000-1000000 / 宇宙洪荒 1000000+ */
+/** 境界阈值表（下限含；2026-08-17 用户定稿 v16：修仙值整体 ×15 展示尺度 + 顺眼圆整阈值）：
+ *  30 / 60 / 90 / 135 / 195 / 270 / 360 / 480 / 630 / 810 / 999（万）——各级所需 30/30/45/60/75/90/120/150/180/189 万严格递增，
+ *  顶值 999 万顺眼；按典型工作日速率（400 分/min）校准：6h → 宇宙洪荒、每重 ~30-55min。 */
 export declare const REALM_THRESHOLDS: number[];
-/** 牛马值 → 境界：value ≥ 阈值即升档（50→筑基、250→金丹…1000000→宇宙洪荒）；value=0 → 炼气期。 */
+/** 牛马值 → 境界：value ≥ 阈值即升档（2万→筑基、4万→金丹…66万→宇宙洪荒）；value=0 → 炼气期。 */
 export declare function realmOf(value: number): string;
 /** 境界档位（0=炼气 … 11=宇宙洪荒）：成长系数里程碑用（只升不降）。 */
 export declare function realmTierOf(value: number): number;
-/** 积分制牛马值：每活跃槽得分 = (修仙槽?1.25:1) × (1000 + calls×10 + steps×10 + 输入×100 + (输入+输出)token/100)，Σ 全部槽（无上限）。
+/** 积分制牛马值：每活跃槽得分 = 修仙加成 × [分钟×150 + 调用×15 + 步骤×15 + 输入×150 + token(输入)/1万 + token(输出)/1万] × 15（展示尺度），Σ 全部槽（无上限）。
  *  分钟分按**并集槽**计（先 OR 全部记录位图，再数活跃槽）——与展示口径"放牧时长（并行不叠加）"一致，
  *  避免"时长 4h35 → 4625"这种用户算不出来的口径差；调用/步骤/输入/token 按各线程真实总量 Σ。
  *  突破奖励不在本函数内（applyBreakthrough 单独叠加，保持基础值可对账）。 */
@@ -190,6 +191,13 @@ export declare function applyBreakthrough(baseValue: number, careerTier: number,
     bonus: number;
     failPenalty: number;
     failed: boolean;
+};
+/** v12（2026-08-17 用户定稿）：突破奖励**按周期独立结算**——每个统计周期用自身基础分与成长系数结算：
+ *  突破次数 = 该周期**最终境界档位**（从炼气起跨过的门槛数，含奖励/成长后的 value 映射，迭代收敛——如昨日 39 万基础×2.3 成长 → 宇宙洪荒 = 突破 11 次）；
+ *  奖励 = 该档位的累计门槛奖励 careerBonus(tier)。无生涯历史状态、无冻结。纯函数（可单测）。growth 缺省 1。 */
+export declare function periodSettle(baseValue: number, growth?: number): {
+    bonus: number;
+    tier: number;
 };
 /** 入定段数（用户定稿）：每「连续工作 25 分钟」记 1 段——5 个活跃槽（5 分钟/槽），允许中间断 1 个槽（5 分钟容错），
  *  连续断 2 槽才断档重计；纯函数可从历史 heatRealm 精确重算。成长系数 = 1 + 段数 × tomatoGrowthPerSeg。 */
