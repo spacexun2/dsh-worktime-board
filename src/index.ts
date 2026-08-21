@@ -1,5 +1,5 @@
 /**
- * @dsh-external/dsh-worktime-board — host 半场（牛马时间看板）。
+ * dsh-worktime-board — host 半场（牛马时间看板）。
  *
  * 轻量化设计：
  *  - 实时折叠 O(1) 置位，落盘 60s 一次（退出时强制 flush）；
@@ -46,7 +46,7 @@ import {
   type SerializedRecord,
 } from './core.js'
 
-export const name = '@dsh-external/dsh-worktime-board'
+export const name = 'dsh-worktime-board'
 export const inject = ['webServer', 'tools', 'sessionQuery', 'workspaceRegistry']
 
 type SessionEventLike = { time?: number; type?: string; data?: any; seq?: unknown }

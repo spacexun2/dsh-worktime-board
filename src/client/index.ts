@@ -1,5 +1,5 @@
 /**
- * @dsh-external/dsh-worktime-board — client（牛马修仙看板浮动面板）。
+ * dsh-worktime-board — client（牛马修仙看板浮动面板）。
  *
  * 形态：body portal（参考 agent-teams ActivityPanel）。右下角小方块 → 点开展开
  * 面板 → 头部拖动（localStorage 记忆）→ 日/周/月 Tab（概览/热力联动）。

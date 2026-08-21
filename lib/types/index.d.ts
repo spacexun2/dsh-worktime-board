@@ -1,5 +1,5 @@
 /**
- * @dsh-external/dsh-worktime-board — host 半场（牛马时间看板）。
+ * dsh-worktime-board — host 半场（牛马时间看板）。
  *
  * 轻量化设计：
  *  - 实时折叠 O(1) 置位，落盘 60s 一次（退出时强制 flush）；
@@ -17,7 +17,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
-export declare const name = "@dsh-external/dsh-worktime-board";
+export declare const name = "dsh-worktime-board";
 export declare const inject: string[];
 export interface Config {
     retentionDays: number;
