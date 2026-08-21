@@ -85,6 +85,6 @@
     "build": "bash scripts/build.sh",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build:client": "tsdown",
-    "test": "node --test test/core.test.mjs test/index.integration.test.mjs test/client.test.mjs"
+    "test": "node --test test/core.test.mjs test/index.integration.test.mjs test/client.test.mjs test/publish-contract.test.mjs"
   }
 }
