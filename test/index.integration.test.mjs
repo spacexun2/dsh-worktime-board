@@ -67,9 +67,9 @@ function createHarness({ schemaVersion, records = [], cursor = {}, backfillCompl
   }
   apply(ctx, { retentionDays: 400, flushSeconds: 60, backfillDelayMs: 500, backfillFileGapMs: 0 })
 
-  const state = () => {
+  const state = (range = 'week') => {
     let body = ''
-    route({ url: '/plugins/dsh-worktime/state?range=week' }, {
+    route({ url: `/plugins/dsh-worktime/state?range=${range}` }, {
       setHeader() {},
       end(value) { body = String(value) },
     })
@@ -152,6 +152,38 @@ test('worktime_summary 默认使用调用 agent 的线程，且周统计跨自�
     const result = await h.tool.execute({ range: 'week' }, { agent: { id: 'session-caller' } })
     assert.match(result.text, /线程 session-caller/)
     assert.match(result.text, /出勤 0\.1 小时/)
+  } finally {
+    h.dispose()
+    h.remove()
+  }
+})
+
+test('周/月视图：score 周期总值与热力各日修仙值同源（每活跃日最终值只算一份）', () => {
+  const today = new Date()
+  const mid = new Date(today)
+  mid.setDate(mid.getDate() - 3)
+  const recToday = createRecord(dayKeyOf(today), 'session-today')
+  const recMid = createRecord(dayKeyOf(mid), 'session-mid')
+  setSlot(recToday, 120) // 10:00 正常槽
+  setSlot(recMid, 130)
+  const h = createHarness({ schemaVersion: 13, records: [recToday, recMid] })
+  try {
+    for (const range of ['week', 'month']) {
+      const st = h.state(range)
+      const activeDays = st.heat.days.filter((d) => d.activeMinutes > 0)
+      assert.equal(activeDays.length, 2)
+      // score.value = Σ 各活跃日最终值，heat.days[].realm = 同一份每日最终值 → 严格相等
+      const sumRealm = activeDays.reduce((sum, d) => sum + (d.realm ?? 0), 0)
+      assert.equal(st.score.value, sumRealm)
+      assert.equal(st.score.activeDays, 2)
+    }
+    // 月视图年历与周热力对同一日给出同一份最终值（memo 两路命中）
+    const monthState = h.state('month')
+    const todayKey = dayKeyOf(new Date())
+    const fromYear = monthState.heat.year.find((d) => d.day === todayKey)?.realm ?? -1
+    const fromDays = monthState.heat.days.find((d) => d.day === todayKey)?.realm ?? -2
+    assert.equal(fromYear, fromDays)
+    assert.ok(fromYear > 0)
   } finally {
     h.dispose()
     h.remove()

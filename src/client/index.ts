@@ -108,6 +108,61 @@ export function escapeHtml(value: unknown): string {
   })[char]!)
 }
 
+/** 关键数据是否无变化（用于跳过无谓重建——用户反馈"每次更新整体刷新"）。
+ *  纯函数（模块级导出，可单测）：修仙值/境界/突破奖励/入定成长也参与比较——
+ *  仅 steps、输入次数或奖励变化（overview 其余字段不变）时仍须重建评分卡与徽标（realm 模式）。 */
+export function sameState(a: State, b: State): boolean {
+  if (a.range !== b.range || a.day !== b.day) return false
+  const oa = a.overview, ob = b.overview
+  if (oa.activeMinutes !== ob.activeMinutes || oa.avgActiveMinutes !== ob.avgActiveMinutes
+    || oa.calls !== ob.calls || oa.inputTokens !== ob.inputTokens
+    || oa.outputTokens !== ob.outputTokens || oa.peakParallel !== ob.peakParallel
+    || oa.llmRatio !== ob.llmRatio || oa.toolRatio !== ob.toolRatio
+    || oa.xianPct !== ob.xianPct || oa.activeDays !== ob.activeDays) return false
+  const sa = a.score, sb = b.score
+  if ((sa?.value ?? 0) !== (sb?.value ?? 0) || sa?.realm !== sb?.realm
+    || (sa?.bonus ?? 0) !== (sb?.bonus ?? 0) || (sa?.growth ?? 1) !== (sb?.growth ?? 1)) return false
+  if (a.threads.length !== b.threads.length) return false
+  for (let i = 0; i < a.threads.length; i++) {
+    const ta = a.threads[i], tb = b.threads[i]
+    if (ta.activeMinutes !== tb.activeMinutes || ta.calls !== tb.calls
+      || ta.outputTokens !== tb.outputTokens
+      || ta.lastActiveAt !== tb.lastActiveAt || ta.archived !== tb.archived
+      || ta.activeDays !== tb.activeDays) return false
+  }
+  if (a.heat.kind !== b.heat.kind) return false
+  const ha = a.heat, hb = b.heat
+  if (ha.kind === 'day' && hb.kind === 'day') {
+    if (ha.heatSlots.length !== hb.heatSlots.length
+      || ha.heatCalls.length !== hb.heatCalls.length
+      || ha.heatTokens.length !== hb.heatTokens.length
+      || (ha.heatInput?.length ?? 0) !== (hb.heatInput?.length ?? 0)
+      || (ha.heatRealm?.length ?? 0) !== (hb.heatRealm?.length ?? 0)) return false
+    for (let i = 0; i < ha.heatSlots.length; i++) {
+      if (ha.heatSlots[i] !== hb.heatSlots[i]
+        || ha.heatCalls[i] !== hb.heatCalls[i]
+        || ha.heatTokens[i] !== hb.heatTokens[i]
+        || (ha.heatInput?.[i] ?? 0) !== (hb.heatInput?.[i] ?? 0)
+        || (ha.heatRealm?.[i] ?? 0) !== (hb.heatRealm?.[i] ?? 0)) return false
+    }
+  } else if (ha.kind === 'days' && hb.kind === 'days') {
+    if (ha.days.length !== hb.days.length) return false
+    for (let i = 0; i < ha.days.length; i++) {
+      const da = ha.days[i], db = hb.days[i]
+      if (da.day !== db.day || da.activeMinutes !== db.activeMinutes
+        || da.calls !== db.calls || da.tokens !== db.tokens
+        || da.xianPct !== db.xianPct
+        || (da.realm ?? 0) !== (db.realm ?? 0)) return false
+    }
+  }
+  // 回填进度变化 → 需刷新（移除"整理中"提示或更新进度）
+  const ba = a.backfill, bb = b.backfill
+  if ((ba?.complete ?? false) !== (bb?.complete ?? false)
+    || (ba?.done ?? 0) !== (bb?.done ?? 0)
+    || (ba?.total ?? 0) !== (bb?.total ?? 0)) return false
+  return true
+}
+
 function injectCss(): void {
   if (document.querySelector(`style[data-plugin-css="${CSS_ID}"]`) !== null) return
   const tag = document.createElement('style')
@@ -525,6 +580,26 @@ function weekStartKey(day: string): string {
   return addDaysKey(day, -dow)
 }
 
+/** 统一持久化面板位置+高度（全量 {x,y,h} 形状）：挪位不抹掉已存高度、调高度不丢位置；
+ *  null 维写 null（构造端对非数字 h/缺失键自动忽略）。localStorage 唯一写入口。 */
+export function persistPlacement(pos: { x: number; y: number } | null, height: number | null): void {
+  try {
+    localStorage.setItem(POS_KEY, JSON.stringify({ x: pos?.x ?? null, y: pos?.y ?? null, h: height }))
+  } catch { /* 隐私模式忽略 */ }
+}
+
+/** 面板高度钳制（拖拽/软默认共用）：下限 220；上限 视口-24（下限优先，极小视口不产生 max<min 退化值）。
+ *  与 CSS max-height calc(100vh - 24px) 同源。 */
+export function clampHeight(height: number, viewportHeight: number): number {
+  return Math.min(Math.max(height, 220), Math.max(220, viewportHeight - 24))
+}
+
+/** 首次打开（未手动拖过高度）的软默认：跟随当前视口自适应、不落盘——手动定过一次即永久尊重记忆值。
+ *  常规视口取 70%；下限 480 保证月视图年历可用。 */
+export function defaultHeightFor(viewportHeight: number): number {
+  return Math.max(clampHeight(Math.round(viewportHeight * 0.7), viewportHeight), Math.min(480, Math.max(220, viewportHeight - 24)))
+}
+
 export function apply(ctx: ClientContext): void {
   injectCss()
   const host = document.createElement('div')
@@ -625,56 +700,6 @@ class WorktimePanel {
     return el !== null && el instanceof HTMLElement && el.classList.contains('wtb-dateBtn')
   }
 
-  /** 关键数据是否无变化（用于跳过无谓重建——用户反馈"每次更新整体刷新"）。 */
-  private sameState(a: State, b: State): boolean {
-    if (a.range !== b.range || a.day !== b.day) return false
-    const oa = a.overview, ob = b.overview
-    if (oa.activeMinutes !== ob.activeMinutes || oa.avgActiveMinutes !== ob.avgActiveMinutes
-      || oa.calls !== ob.calls || oa.inputTokens !== ob.inputTokens
-      || oa.outputTokens !== ob.outputTokens || oa.peakParallel !== ob.peakParallel
-      || oa.llmRatio !== ob.llmRatio || oa.toolRatio !== ob.toolRatio
-      || oa.xianPct !== ob.xianPct || oa.activeDays !== ob.activeDays) return false
-    if (a.threads.length !== b.threads.length) return false
-    for (let i = 0; i < a.threads.length; i++) {
-      const ta = a.threads[i], tb = b.threads[i]
-      if (ta.activeMinutes !== tb.activeMinutes || ta.calls !== tb.calls
-        || ta.outputTokens !== tb.outputTokens
-        || ta.lastActiveAt !== tb.lastActiveAt || ta.archived !== tb.archived
-        || ta.activeDays !== tb.activeDays) return false
-    }
-    if (a.heat.kind !== b.heat.kind) return false
-    const ha = a.heat, hb = b.heat
-    if (ha.kind === 'day' && hb.kind === 'day') {
-      if (ha.heatSlots.length !== hb.heatSlots.length
-        || ha.heatCalls.length !== hb.heatCalls.length
-        || ha.heatTokens.length !== hb.heatTokens.length
-        || (ha.heatInput?.length ?? 0) !== (hb.heatInput?.length ?? 0)
-        || (ha.heatRealm?.length ?? 0) !== (hb.heatRealm?.length ?? 0)) return false
-      for (let i = 0; i < ha.heatSlots.length; i++) {
-        if (ha.heatSlots[i] !== hb.heatSlots[i]
-          || ha.heatCalls[i] !== hb.heatCalls[i]
-          || ha.heatTokens[i] !== hb.heatTokens[i]
-          || (ha.heatInput?.[i] ?? 0) !== (hb.heatInput?.[i] ?? 0)
-          || (ha.heatRealm?.[i] ?? 0) !== (hb.heatRealm?.[i] ?? 0)) return false
-      }
-    } else if (ha.kind === 'days' && hb.kind === 'days') {
-      if (ha.days.length !== hb.days.length) return false
-      for (let i = 0; i < ha.days.length; i++) {
-        const da = ha.days[i], db = hb.days[i]
-        if (da.day !== db.day || da.activeMinutes !== db.activeMinutes
-          || da.calls !== db.calls || da.tokens !== db.tokens
-          || da.xianPct !== db.xianPct
-          || (da.realm ?? 0) !== (db.realm ?? 0)) return false
-      }
-    }
-    // 回填进度变化 → 需刷新（移除"整理中"提示或更新进度）
-    const ba = a.backfill, bb = b.backfill
-    if ((ba?.complete ?? false) !== (bb?.complete ?? false)
-      || (ba?.done ?? 0) !== (bb?.done ?? 0)
-      || (ba?.total ?? 0) !== (bb?.total ?? 0)) return false
-    return true
-  }
-
   /** 区块级防御渲染：单个区块异常只降级该区块（显示占位），不拖垮整个面板、不回滚数据。 */
   private safeRender(name: string, fn: () => string): string {
     try {
@@ -702,7 +727,7 @@ class WorktimePanel {
       // 期间又切换了：过期响应丢弃（date 指定时校验返回日，防快速切日期被旧响应覆盖）
       if (this.open && (body.range !== this.tab || (date !== null && body.day !== date))) return
       const prev = this.data
-      if (prev !== null && this.sameState(prev, body)) {
+      if (prev !== null && sameState(prev, body)) {
         this.data = body // 无实质变化：仅更新快照，不重建
         // 收起时徽标忙碌点仍需刷新（光晕呼吸）
         if (!this.open) {
@@ -790,7 +815,7 @@ class WorktimePanel {
     // 折叠显示模式：时长 | 修仙值（localStorage 持久化；默认时长）
     let mode: 'duration' | 'realm' = 'duration'
     try { mode = localStorage.getItem('wtb-badge-mode') === 'realm' ? 'realm' : 'duration' } catch { /* 隐私模式忽略 */ }
-    const realmValue = s?.realmByPeriod?.day?.value ?? s?.value ?? 0
+    const realmValue = s?.value ?? 0 // v17 起 host 只下发当日/周期总值，径直读 value
     const val = o === undefined ? '—'
       : mode === 'realm' ? fmtWan(Math.round(realmValue))
       : fmtDur(o.activeMinutes)
@@ -878,7 +903,8 @@ class WorktimePanel {
     const d = this.data
     const p = this.pos
     const style = p === null ? 'right:16px;bottom:16px' : `left:${p.x}px;top:${p.y}px`
-    const heightStyle = this.height !== null ? `height:${this.height}px;` : ''
+    // 未手动拖过高度 → 软默认（当前视口自适应、不落盘）；拖过一次永久尊重记忆值
+    const heightStyle = `height:${this.height ?? defaultHeightFor(window.innerHeight)}px;`
     // 反馈 6：重建 innerHTML 前记住滚动位置，重建后恢复
     const scrollTop = this.host.querySelector('.wtb-body')?.scrollTop ?? 0
     this.host.innerHTML = `
@@ -1650,7 +1676,7 @@ class WorktimePanel {
           window.removeEventListener('pointermove', move)
           window.removeEventListener('pointerup', up)
           this.pos = { x: root.offsetLeft, y: root.offsetTop }
-          try { localStorage.setItem(POS_KEY, JSON.stringify(this.pos)) } catch { /* 忽略 */ }
+          persistPlacement(this.pos, this.height) // 全量形状：挪位不抹掉已存高度（未拖过时 h=null，软默认继续生效）
         }
         window.addEventListener('pointermove', move)
         window.addEventListener('pointerup', up)
@@ -1664,17 +1690,14 @@ class WorktimePanel {
         const startY = e.clientY
         const startH = root.offsetHeight
         const move = (ev: PointerEvent): void => {
-          const h = Math.min(Math.max(startH + ev.clientY - startY, 220), window.innerHeight - 24)
+          const h = clampHeight(startH + ev.clientY - startY, window.innerHeight)
           this.height = h
           root.style.height = `${h}px`
         }
         const up = (): void => {
           window.removeEventListener('pointermove', move)
           window.removeEventListener('pointerup', up)
-          const p = this.pos
-          try {
-            localStorage.setItem(POS_KEY, JSON.stringify({ x: p?.x ?? null, y: p?.y ?? null, h: this.height }))
-          } catch { /* 忽略 */ }
+          persistPlacement(this.pos, this.height) // 全量形状：调高度不丢位置
         }
         window.addEventListener('pointermove', move)
         window.addEventListener('pointerup', up)
