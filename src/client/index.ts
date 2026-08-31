@@ -1,5 +1,5 @@
 /**
- * dsh-worktime-board — client（牛马修仙看板浮动面板）。
+ * @dsh-external/dsh-worktime-board — client（牛马修仙看板浮动面板）。
  *
  * 形态：body portal（参考 agent-teams ActivityPanel）。右下角小方块 → 点开展开
  * 面板 → 头部拖动（localStorage 记忆）→ 日/周/月 Tab（概览/热力联动）。
@@ -600,6 +600,17 @@ export function defaultHeightFor(viewportHeight: number): number {
   return Math.max(clampHeight(Math.round(viewportHeight * 0.7), viewportHeight), Math.min(480, Math.max(220, viewportHeight - 24)))
 }
 
+/** 面板位置钳制（恢复/展开时防"记忆坐标落在当前视口外"——跨窗口/改窗口大小/换显示器后 localStorage 旧坐标原样套用会跑出屏）。
+ *  面板宽 400（CSS max-width 兜底小视口）；边距 8 与 CSS max-height 的 24 同族；y 上限留 48 保证拖拽头部可见。
+ *  与 clampHeight 同哲学：极小视口下限优先，不产生 max<min 退化值。 */
+export function clampPlacement(pos: { x: number; y: number }, viewportW: number, viewportH: number): { x: number; y: number } {
+  const panelW = Math.min(400, Math.max(220, viewportW - 24))
+  return {
+    x: Math.min(Math.max(pos.x, 8), Math.max(8, viewportW - panelW - 8)),
+    y: Math.min(Math.max(pos.y, 8), Math.max(8, viewportH - 48)),
+  }
+}
+
 export function apply(ctx: ClientContext): void {
   injectCss()
   const host = document.createElement('div')
@@ -901,7 +912,12 @@ class WorktimePanel {
 
   private renderPanel(): void {
     const d = this.data
-    const p = this.pos
+    // 记忆坐标先过视口钳制再上 DOM：跨窗口/改窗口尺寸后旧坐标不清洗就会展开在屏外；修正值回写 localStorage 清洗坏记忆
+    const p = this.pos === null ? null : clampPlacement(this.pos, window.innerWidth, window.innerHeight)
+    if (p !== null && this.pos !== null && (p.x !== this.pos.x || p.y !== this.pos.y)) {
+      this.pos = p
+      persistPlacement(p, this.height)
+    }
     const style = p === null ? 'right:16px;bottom:16px' : `left:${p.x}px;top:${p.y}px`
     // 未手动拖过高度 → 软默认（当前视口自适应、不落盘）；拖过一次永久尊重记忆值
     const heightStyle = `height:${this.height ?? defaultHeightFor(window.innerHeight)}px;`

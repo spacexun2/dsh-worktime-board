@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { escapeHtml, sameState, persistPlacement, defaultHeightFor, clampHeight } from '../src/client/index.ts'
+import { escapeHtml, sameState, persistPlacement, defaultHeightFor, clampHeight, clampPlacement } from '../src/client/index.ts'
 
 test('会话标题在插入 HTML 前转义文本和属性危险字符', () => {
   const title = '<img src=x onerror=alert(1)>"&\''
@@ -67,4 +67,17 @@ test('defaultHeightFor / clampHeight：视口自适应 + 边界钳制', () => {
   assert.equal(clampHeight(5000, 1080), 1056)
   // 极小视口 max<min 退化：取 220（渲染端另有 CSS max-height 兜底）
   assert.equal(clampHeight(100, 200), 220)
+})
+
+test('clampPlacement：记忆坐标过视口钳制（防跨窗口/改尺寸后展开在屏外）', () => {
+  // 视口内坐标原样保留
+  assert.deepEqual(clampPlacement({ x: 100, y: 80 }, 1920, 1080), { x: 100, y: 80 })
+  // 旧坐标超出右/下边界（换小窗口/换显示器）：x 收进 视口宽-面板宽-8，y 收进 视口高-48（拖拽头部可见）
+  assert.deepEqual(clampPlacement({ x: 2200, y: 900 }, 1600, 900), { x: 1192, y: 852 })
+  // 负坐标（另一台显示器在左侧时拖出）收到下限 8
+  assert.deepEqual(clampPlacement({ x: -300, y: -50 }, 1920, 1080), { x: 8, y: 8 })
+  // 极小视口退化：x 上限取下限族 8~16，不产生 max<min 反转
+  const tiny = clampPlacement({ x: 5000, y: 5000 }, 300, 200)
+  assert.equal(tiny.x, 16)
+  assert.equal(tiny.y, 152)
 })
