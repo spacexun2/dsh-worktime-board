@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { escapeHtml, sameState, persistPlacement, defaultHeightFor, clampHeight, clampPlacement } from '../src/client/index.ts'
+import { escapeHtml, sameState, persistPlacement, defaultHeightFor, clampHeight, clampPlacement, parseBadgePos, parseBadgeMini, clampBadgePosition } from '../src/client/index.ts'
 
 test('会话标题在插入 HTML 前转义文本和属性危险字符', () => {
   const title = '<img src=x onerror=alert(1)>"&\''
@@ -80,4 +80,50 @@ test('clampPlacement：记忆坐标过视口钳制（防跨窗口/改尺寸后�
   const tiny = clampPlacement({ x: 5000, y: 5000 }, 300, 200)
   assert.equal(tiny.x, 16)
   assert.equal(tiny.y, 152)
+})
+
+test('parseBadgePos / parseBadgeMini：坏数据不拖垮渲染，缺省回退默认形态', () => {
+  // 正常坐标
+  assert.deepEqual(parseBadgePos('{"x":448,"y":224}'), { x: 448, y: 224 })
+  // null / 损坏 JSON / 非数字 / 非有限数 → null（未记忆，走 CSS 默认右下角）
+  assert.equal(parseBadgePos(null), null)
+  assert.equal(parseBadgePos('not-json'), null)
+  assert.equal(parseBadgePos('{"x":"448","y":224}'), null)
+  assert.equal(parseBadgePos('{"x":null,"y":224}'), null)
+  assert.equal(parseBadgePos('{"x":1e999,"y":0}'), null)
+  // 折叠态只认 'true'
+  assert.equal(parseBadgeMini('true'), true)
+  assert.equal(parseBadgeMini('false'), false)
+  assert.equal(parseBadgeMini(null), false)
+  assert.equal(parseBadgeMini('1'), false)
+})
+
+test('clampBadgePosition：拖动/恢复都把角标整体收进视口（4px 边距）', () => {
+  const size = { w: 156, h: 46 }
+  // 视口内的坐标原样保留（取整）
+  assert.deepEqual(clampBadgePosition({ x: 100.4, y: 80.6 }, 1920, 1080, size), { x: 100, y: 81 })
+  // 拖出右下/左上：收进 视口-尺寸-4 / 4
+  assert.deepEqual(clampBadgePosition({ x: 5000, y: 5000 }, 1920, 1080, size), { x: 1760, y: 1030 })
+  assert.deepEqual(clampBadgePosition({ x: -300, y: -80 }, 1920, 1080, size), { x: 4, y: 4 })
+  // 折叠圆点用 30×30：右下角上限更靠边
+  assert.deepEqual(clampBadgePosition({ x: 5000, y: 5000 }, 800, 600, { w: 30, h: 30 }), { x: 766, y: 566 })
+  // 极小视口：上限与下限同族（4），不产生 min>max 反转
+  assert.deepEqual(clampBadgePosition({ x: 99, y: 99 }, 20, 20, size), { x: 4, y: 4 })
+})
+
+test('角标位置/折叠态：渲染输出自带 style 与 data-mini（消除重绘闪烁）', () => {
+  const source = readFileSync(new URL('../src/client/index.ts', import.meta.url), 'utf8')
+  // 位置必须拼进 innerHTML（节点出生即最终坐标），而不是渲染后再改 style
+  assert.match(source, /class="wtb-badge"\$\{style\} data-mini="\$\{mini\}"/)
+  assert.match(source, /style="left:\$\{p\.x\}px;top:\$\{p\.y\}px;right:auto;bottom:auto"/)
+  // 折叠态渲染时直接带 data-mini，CSS 有对应收缩规则
+  assert.match(source, /\.wtb-badge\[data-mini="1"\]\{width:30px;height:30px/)
+  // 手势样式：拖动期间不选中文本、不滚动页面
+  assert.match(source, /\.wtb-badge\{touch-action:none;user-select:none;-webkit-user-select:none\}/)
+  // 拖动阈值/长按/误点抑制常量存在且被使用
+  assert.match(source, /const BADGE_DRAG_THRESHOLD = 5/)
+  assert.match(source, /const BADGE_LONG_PRESS_MS = 550/)
+  assert.match(source, /const BADGE_CLICK_SUPPRESS_MS = 500/)
+  assert.match(source, /setPointerCapture\(e\.pointerId\)/)
+  assert.match(source, /persistBadgeMini\(mini\)/)
 })
