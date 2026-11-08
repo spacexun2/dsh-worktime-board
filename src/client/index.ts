@@ -28,6 +28,16 @@ const POLL_MS_OPEN = 5000
 const POLL_MS_CLOSED = 30000
 const CSS_ID = 'dsh-worktime-board/client.css'
 const POS_KEY = 'dsh-worktime-board.pos'
+/** 面板基准宽度（与 CSS .wtb-panel width 同源）；窄屏按 视口-24 回落。 */
+const PANEL_WIDTH = 400
+/** 视口边距：锚点定位与 clamp 共用（CSS max-width/max-height 里的 24 = 2×12 同源）。 */
+const VIEWPORT_MARGIN = 12
+/** 窄屏阈值：视口宽 ≤ 640 走底部抽屉（手机 / 竖屏平板），此时忽略记忆坐标。 */
+const DRAWER_MAX_WIDTH = 640
+/** 抽屉下拉收起的位移阈值（px）：过阈值松手即收起，否则回弹。 */
+const DRAWER_CLOSE_PX = 96
+/** 角标高度兜底（取不到 DOM rect 时按 CSS .wtb-badge height:46 估算）。 */
+const BADGE_FALLBACK_HEIGHT = 46
 
 type HeatKind = 'duration' | 'tokens' | 'realm'
 type SortBy = 'active' | 'latest'
@@ -181,6 +191,16 @@ function injectCss(): void {
 .wtb-badgeSwitch{flex:none;width:22px;height:22px;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:11px;color:#8a8a8a;border:1px solid rgba(255,255,255,.1);background:transparent;cursor:pointer}
 .wtb-badgeSwitch:hover{color:#fff;border-color:rgba(255,255,255,.3)}
 .wtb-panel{position:fixed;width:400px;max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);display:flex;flex-direction:column;background:rgba(24,24,30,.96);border:1px solid rgba(255,255,255,.09);border-radius:14px;box-shadow:0 12px 44px rgba(0,0,0,.6);overflow:hidden}
+.wtb-panel-enter{animation:wtb-panel-in .14s cubic-bezier(.22,.61,.36,1)}
+.wtb-panel-drawer.wtb-panel-enter{animation-name:wtb-drawer-in;animation-duration:.18s}
+@keyframes wtb-panel-in{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:none}}
+@keyframes wtb-drawer-in{from{opacity:0;transform:translateY(100%)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.wtb-panel-enter,.wtb-panel-drawer.wtb-panel-enter{animation:none}}
+.wtb-panel-drawer{left:0;right:0;bottom:0;top:auto;width:100%;max-width:none;max-height:80vh;border-radius:16px 16px 0 0;padding-bottom:env(safe-area-inset-bottom,0px)}
+.wtb-panel-drawer .wtb-head{padding-top:16px;cursor:default}
+.wtb-panel-drawer .wtb-head::before{content:'';position:absolute;top:6px;left:50%;transform:translateX(-50%);width:36px;height:4px;border-radius:2px;background:rgba(255,255,255,.22)}
+.wtb-panel-drawer .wtb-body{overflow:auto;overscroll-behavior:contain}
+.wtb-panel-drawer .wtb-resize{display:none}
 .wtb-head{position:relative;display:flex;align-items:center;gap:8px;padding:10px 12px;background:rgba(255,255,255,.04);cursor:grab;user-select:none;border-bottom:1px solid rgba(255,255,255,.06)}
 .wtb-head:active{cursor:grabbing}
 .wtb-title{font-size:13px;font-weight:700;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -611,6 +631,88 @@ export function clampPlacement(pos: { x: number; y: number }, viewportW: number,
   }
 }
 
+/** 角标矩形（getBoundingClientRect 的最小投影）：只读角标几何，不参与角标自身行为。 */
+export interface RectLike {
+  left: number
+  top: number
+  right: number
+  bottom: number
+}
+
+/** 面板形态：float = 自由浮层（可拖拽），drawer = 窄屏底部抽屉。 */
+export type PanelMode = 'float' | 'drawer'
+
+/** 面板几何（纯函数输出，均为视口坐标 px）。 */
+export interface PanelGeometry {
+  mode: PanelMode
+  x: number
+  y: number
+  width: number
+  height: number
+  /** transform-origin 百分比：指向角标中心，入场缩放/上滑从角标处"长出来"。 */
+  originX: number
+  originY: number
+}
+
+/** 视口右下角兜底角标矩形（与 CSS .wtb-badge right:16px;bottom:16px;height:46px 同源）：
+ *  面板展开后角标已被替换掉，取不到 rect 时按 CSS 默认值反推，保证锚点语义不塌。 */
+export function fallbackBadgeRect(viewportW: number, viewportH: number): RectLike {
+  const right = viewportW - 16
+  const bottom = viewportH - 16
+  return { right, bottom, left: right - 120, top: bottom - BADGE_FALLBACK_HEIGHT }
+}
+
+/** 角标中心在面板盒内的百分比坐标（transform-origin）：
+ *  面板远离角标时百分比越界 → clamp 到 [0,100]（贴着面板边缘缩放，不产生反向位移）。 */
+export function panelOriginPct(badge: RectLike, box: { x: number; y: number; width: number; height: number }): { x: number; y: number } {
+  const bx = (badge.left + badge.right) / 2
+  const by = (badge.top + badge.bottom) / 2
+  const pctOf = (v: number, start: number, size: number): number => size <= 0
+    ? 50
+    : Math.min(100, Math.max(0, ((v - start) / size) * 100))
+  return { x: pctOf(bx, box.x, box.width), y: pctOf(by, box.y, box.height) }
+}
+
+/** 首次展开（无记忆坐标）的面板摆放：按角标所在象限决定展开方向，再 clamp 进视口。
+ *  水平：角标在右半边 → 面板右边缘贴角标右边缘（向左展开）；左半边 → 左边缘贴角标左边缘（向右展开）。
+ *  垂直：角标在下半边 → 面板底边贴角标顶边（向上展开）；上半边 → 顶边贴角标底边（向下展开）。
+ *  窄屏（≤640）：改贴底抽屉（全宽 100%、高度上限 80vh），与 CSS .wtb-panel-drawer 同源。
+ *  极小视口沿用 clampHeight/clampPlacement 的"下限优先"哲学：不产生 max<min 反转值。 */
+export function panelAnchorGeometry(
+  badge: RectLike,
+  viewportW: number,
+  viewportH: number,
+  desiredHeight: number,
+): PanelGeometry {
+  const minH = 220
+  if (viewportW <= DRAWER_MAX_WIDTH) {
+    const cap = Math.max(minH, Math.round(viewportH * 0.8))
+    const height = Math.min(Math.max(desiredHeight, minH), cap)
+    return { mode: 'drawer', x: 0, y: Math.max(0, viewportH - height), width: viewportW, height, originX: 50, originY: 100 }
+  }
+  const width = Math.min(PANEL_WIDTH, Math.max(220, viewportW - VIEWPORT_MARGIN * 2))
+  const cx = (badge.left + badge.right) / 2
+  const cy = (badge.top + badge.bottom) / 2
+  const alignX = cx >= viewportW / 2 ? 'right' : 'left'
+  const alignY = cy >= viewportH / 2 ? 'bottom' : 'top'
+  // 可用高度：向屏幕内侧展开，不与角标互相遮挡（底边留 VIEWPORT_MARGIN）
+  const maxH = alignY === 'bottom'
+    ? Math.max(minH, badge.top - VIEWPORT_MARGIN)
+    : Math.max(minH, viewportH - badge.bottom - VIEWPORT_MARGIN)
+  const height = Math.min(Math.max(desiredHeight, minH), maxH, Math.max(minH, viewportH - VIEWPORT_MARGIN * 2))
+  const rawX = alignX === 'right' ? badge.right - width : badge.left
+  const rawY = alignY === 'bottom' ? badge.top - height : badge.bottom
+  const x = Math.min(Math.max(rawX, VIEWPORT_MARGIN), Math.max(VIEWPORT_MARGIN, viewportW - width - VIEWPORT_MARGIN))
+  const y = Math.min(Math.max(rawY, VIEWPORT_MARGIN), Math.max(VIEWPORT_MARGIN, viewportH - height - VIEWPORT_MARGIN))
+  const origin = panelOriginPct(badge, { x, y, width, height })
+  return { mode: 'float', x, y, width, height, originX: origin.x, originY: origin.y }
+}
+
+/** 百分比取 1 位小数（transform-origin 用，避免超长小数污染 style 串）。 */
+function pctOfStyle(v: number): number {
+  return Math.round(v * 10) / 10
+}
+
 export function apply(ctx: ClientContext): void {
   injectCss()
   const host = document.createElement('div')
@@ -651,6 +753,15 @@ class WorktimePanel {
   private includeArchived = false
   private pos: { x: number; y: number } | null = null
   private height: number | null = null
+  /** 角标锚点（距视口右下角的偏移 + 自身尺寸）：面板展开后角标已被卸载，
+   *  靠它在 resize / 重新渲染时复算锚点（跨窗口尺寸变化仍然指向角标原方位）。 */
+  private badgeAnchor: { width: number; height: number; rightInset: number; bottomInset: number } | null = null
+  /** 本次展开是否还在入场动效窗口内：只在打开那一次挂动画类，避免轮询重建反复播动画。 */
+  private entering = false
+  /** 当前渲染形态（float = 自由浮层；drawer = 窄屏底部抽屉），bindPanel 的 head 手势按它分流。 */
+  private panelMode: PanelMode = 'float'
+  /** resize 合并帧句柄（拖动改窗口大小时每帧只重排一次）。 */
+  private resizeRaf: number | null = null
   /** 评分卡点击展开的「修仙阶段详情」toggle 状态（面板重建后恢复）。 */
   private showRealmDetail = false
   private data: State | null = null
@@ -677,13 +788,29 @@ class WorktimePanel {
   mount(): void {
     void this.tick()
     this.timer = setInterval(() => { void this.tick() }, this.pollMs())
+    window.addEventListener('resize', this.onResize)
   }
 
   dispose(): void {
     this.disposed = true
     this.detachCalDocHandler()
     if (this.timer !== null) clearInterval(this.timer)
+    window.removeEventListener('resize', this.onResize)
+    if (this.resizeRaf !== null) {
+      cancelAnimationFrame(this.resizeRaf)
+      this.resizeRaf = null
+    }
     this.host.innerHTML = ''
+  }
+
+  /** 视口变化重排（合并到下一帧）：窄屏 ↔ 宽屏要切换抽屉/浮层，锚点也要按新视口重算；
+   *  角标坐标先过视口钳制的老路径同样在这里得到修正。 */
+  private readonly onResize = (): void => {
+    if (this.resizeRaf !== null) return
+    this.resizeRaf = requestAnimationFrame(() => {
+      this.resizeRaf = null
+      if (this.open && !this.disposed) this.render()
+    })
   }
 
   /** 移除日历外部点击关闭的 document 监听器（幂等；随弹层关闭 / 面板收起 / 组件卸载调用）。 */
@@ -841,7 +968,9 @@ class WorktimePanel {
         <span class="wtb-badgeSwitch" data-badge-switch title="切换显示：时长 / 修仙值" aria-label="切换显示内容">⇄</span>
       </button>`
     this.host.querySelector('.wtb-badge')?.addEventListener('click', () => {
+      this.captureBadgeAnchor() // 必须先量：下面的 render() 会把角标换成面板
       this.open = true
+      this.entering = true
       this.reschedule()
       // 收起时 data 可能是 day 口径（徽标用），展开后立即拉当前 tab，避免错位显示；
       // 日视图历史日期：收起期间 data 已被今日覆盖 → 需按 viewDate 重拉
@@ -910,21 +1039,81 @@ class WorktimePanel {
     this.timer = setInterval(() => { void this.tick() }, this.pollMs())
   }
 
+  /** 量取角标几何并存成"距视口右下角的偏移"：面板展开后角标已被卸载，靠这份锚点跨 resize 复算。 */
+  private captureBadgeAnchor(): void {
+    const vw = window.innerWidth
+    const vh = window.innerHeight
+    const el = this.host.querySelector('.wtb-badge')
+    const rect = el === null ? null : el.getBoundingClientRect()
+    const usable = rect !== null && rect.width > 0 && rect.height > 0 ? rect : fallbackBadgeRect(vw, vh)
+    this.badgeAnchor = {
+      width: usable.right - usable.left,
+      height: usable.bottom - usable.top,
+      rightInset: vw - usable.right,
+      bottomInset: vh - usable.bottom,
+    }
+  }
+
+  /** 当前角标矩形（视口坐标）：有锚点则按当前视口复算，否则按 CSS 默认右下角兜底。 */
+  private badgeRectNow(): RectLike {
+    const vw = window.innerWidth
+    const vh = window.innerHeight
+    const a = this.badgeAnchor
+    if (a === null) return fallbackBadgeRect(vw, vh)
+    const right = vw - a.rightInset
+    const bottom = vh - a.bottomInset
+    return { right, bottom, left: right - a.width, top: bottom - a.height }
+  }
+
+  /** 收起面板（关闭按钮 / 抽屉下拉）：清日历弹层 → 恢复角标轮询节奏 → 重绘为角标。 */
+  private closePanel(): void {
+    this.open = false
+    this.calOpen = false
+    this.detachCalDocHandler()
+    this.reschedule()
+    this.render()
+  }
+
   private renderPanel(): void {
     const d = this.data
-    // 记忆坐标先过视口钳制再上 DOM：跨窗口/改窗口尺寸后旧坐标不清洗就会展开在屏外；修正值回写 localStorage 清洗坏记忆
-    const p = this.pos === null ? null : clampPlacement(this.pos, window.innerWidth, window.innerHeight)
-    if (p !== null && this.pos !== null && (p.x !== this.pos.x || p.y !== this.pos.y)) {
-      this.pos = p
-      persistPlacement(p, this.height)
+    const viewportW = window.innerWidth
+    const viewportH = window.innerHeight
+    const badge = this.badgeRectNow()
+    const narrow = viewportW <= DRAWER_MAX_WIDTH
+    // 未手动拖过高度 → 软默认（当前视口自适应、不落盘）；拖过一次永久尊重记忆值；抽屉默认吃满 80vh 上限
+    const desiredHeight = this.height ?? (narrow ? Math.round(viewportH * 0.8) : defaultHeightFor(viewportH))
+    // 锚点几何：首次展开按角标象限选方向（再 clamp 进视口）；窄屏直接回落底部抽屉
+    const geo = panelAnchorGeometry(badge, viewportW, viewportH, desiredHeight)
+    this.panelMode = geo.mode
+    let width = geo.width
+    let height = geo.height
+    let left = geo.x
+    let top = geo.y
+    let origin = { x: geo.originX, y: geo.originY }
+    if (geo.mode === 'float' && this.pos !== null) {
+      // 手动摆过位置：记忆坐标优先（先过视口钳制，跨窗口/改尺寸后旧坐标不清洗就会展开在屏外；修正值回写清洗坏记忆）
+      const p = clampPlacement(this.pos, viewportW, viewportH)
+      if (p.x !== this.pos.x || p.y !== this.pos.y) {
+        this.pos = p
+        persistPlacement(p, this.height)
+      }
+      left = p.x
+      top = p.y
+      width = Math.min(PANEL_WIDTH, Math.max(220, viewportW - VIEWPORT_MARGIN * 2))
+      height = clampHeight(desiredHeight, viewportH)
+      origin = panelOriginPct(badge, { x: left, y: top, width, height })
     }
-    const style = p === null ? 'right:16px;bottom:16px' : `left:${p.x}px;top:${p.y}px`
-    // 未手动拖过高度 → 软默认（当前视口自适应、不落盘）；拖过一次永久尊重记忆值
-    const heightStyle = `height:${this.height ?? defaultHeightFor(window.innerHeight)}px;`
+    const originStyle = `transform-origin:${pctOfStyle(origin.x)}% ${pctOfStyle(origin.y)}%`
+    const style = geo.mode === 'drawer'
+      ? `left:0;right:0;bottom:0;width:100%;height:${height}px;${originStyle}`
+      : `left:${left}px;top:${top}px;width:${width}px;height:${height}px;${originStyle}`
+    const cls = geo.mode === 'drawer' ? 'wtb-panel wtb-root wtb-panel-drawer' : 'wtb-panel wtb-root'
+    const enterCls = this.entering ? ' wtb-panel-enter' : ''
+    this.entering = false
     // 反馈 6：重建 innerHTML 前记住滚动位置，重建后恢复
     const scrollTop = this.host.querySelector('.wtb-body')?.scrollTop ?? 0
     this.host.innerHTML = `
-      <div class="wtb-panel wtb-root" style="${heightStyle}${style}">
+      <div class="${cls}${enterCls}" style="${style}">
         <div class="wtb-head">
           <span class="wtb-title">🐂🐴 牛马修仙看板</span>
           <div class="wtb-tabs">
@@ -1498,13 +1687,7 @@ class WorktimePanel {
   private bindPanel(): void {
     const root = this.host.querySelector('.wtb-panel') as HTMLElement | null
     if (root === null) return
-    root.querySelector('.wtb-close')?.addEventListener('click', () => {
-      this.open = false
-      this.calOpen = false
-      this.detachCalDocHandler()
-      this.reschedule()
-      this.render()
-    })
+    root.querySelector('.wtb-close')?.addEventListener('click', () => { this.closePanel() })
     root.querySelectorAll('.wtb-tab').forEach((el) => {
       el.addEventListener('click', () => {
         const next = el.getAttribute('data-tab') as Range
@@ -1677,6 +1860,30 @@ class WorktimePanel {
     if (head !== null) {
       head.addEventListener('pointerdown', (e: PointerEvent) => {
         if ((e.target as HTMLElement).closest('.wtb-tab, .wtb-close, .wtb-dateBtn, .wtb-calendar, .wtb-today') !== null) return
+        // 抽屉模式：head 即把手——下拉超过阈值收起，未过阈值回弹；贴底抽屉不做自由拖拽（拖走会脱离锚点语义）
+        if (this.panelMode === 'drawer') {
+          const startY = e.clientY
+          let dy = 0
+          const move = (ev: PointerEvent): void => {
+            dy = Math.max(0, ev.clientY - startY)
+            root.style.transition = 'none'
+            root.style.transform = `translateY(${dy}px)`
+          }
+          const up = (): void => {
+            window.removeEventListener('pointermove', move)
+            window.removeEventListener('pointerup', up)
+            if (dy > DRAWER_CLOSE_PX) {
+              this.closePanel()
+              return
+            }
+            root.style.transition = 'transform .16s ease'
+            root.style.transform = ''
+            window.setTimeout(() => { root.style.transition = '' }, 200)
+          }
+          window.addEventListener('pointermove', move)
+          window.addEventListener('pointerup', up)
+          return
+        }
         const startX = e.clientX
         const startY = e.clientY
         const rect = root.getBoundingClientRect()
