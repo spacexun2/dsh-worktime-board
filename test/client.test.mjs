@@ -81,3 +81,71 @@ test('clampPlacement：记忆坐标过视口钳制（防跨窗口/改尺寸后�
   assert.equal(tiny.x, 16)
   assert.equal(tiny.y, 152)
 })
+
+test('clampPlacement：拖拽越界回归——起点+delta 越界后仍落在 [8, vw-panelW-8] x [8, vh-48]', () => {
+  // 与 clampPlacement 内部同源的 panelW：min(400, max(220, vw-24))
+  const bounds = (vw, vh) => {
+    const panelW = Math.min(400, Math.max(220, vw - 24))
+    return { minX: 8, maxX: Math.max(8, vw - panelW - 8), minY: 8, maxY: Math.max(8, vh - 48) }
+  }
+  // 宽屏：向右下拖 9999px 顶到边界，向左上拖 9999px 收到下限（拖不丢面板）
+  assert.deepEqual(clampPlacement({ x: 300 + 9999, y: 200 + 9999 }, 1440, 900), { x: 1032, y: 852 })
+  assert.deepEqual(clampPlacement({ x: 300 - 9999, y: 200 - 9999 }, 1440, 900), { x: 8, y: 8 })
+  // 多视口 × 多方向：任意越界 delta 的结果都必须整体在屏内、且 header 至少留 48px
+  const viewports = [[1440, 900], [1024, 768], [390, 844], [320, 480]]
+  const deltas = [[9999, 0], [-9999, 0], [0, 9999], [0, -9999], [9999, 9999], [-9999, -9999], [0, 0]]
+  for (const [vw, vh] of viewports) {
+    const b = bounds(vw, vh)
+    for (const [dx, dy] of deltas) {
+      const p = clampPlacement({ x: 300 + dx, y: 200 + dy }, vw, vh)
+      assert.ok(p.x >= b.minX && p.x <= b.maxX, `${vw}x${vh} d(${dx},${dy}) x=${p.x} 越界`)
+      assert.ok(p.y >= b.minY && p.y <= b.maxY, `${vw}x${vh} d(${dx},${dy}) y=${p.y} 越界`)
+      // 右边缘不出屏（maxX >= minX 的常规视口）
+      assert.ok(p.x + Math.min(400, Math.max(220, vw - 24)) <= vw, `${vw}x${vh} 右边缘出屏`)
+    }
+  }
+})
+
+test('面板拖拽：move/up 均经 clampPlacement 钳制，坏坐标不再写进 localStorage', () => {
+  const source = readFileSync(new URL('../src/client/index.ts', import.meta.url), 'utf8')
+  // move：起点 + 实时 delta 先钳制再写 style
+  assert.match(source, /const p = clampPlacement\(\{ x: startLeft \+ ev\.clientX - startX, y: startTop \+ ev\.clientY - startY \}, window\.innerWidth, window\.innerHeight\)/)
+  assert.match(source, /root\.style\.left = `\$\{p\.x\}px`/)
+  assert.match(source, /root\.style\.top = `\$\{p\.y\}px`/)
+  // 旧实现（裸 delta 直写）必须已消失
+  assert.doesNotMatch(source, /root\.style\.left = `\$\{startLeft \+ ev\.clientX - startX\}px`/)
+  // up：落盘前再钳一次
+  assert.match(source, /this\.pos = clampPlacement\(\{ x: root\.offsetLeft, y: root\.offsetTop \}, window\.innerWidth, window\.innerHeight\)/)
+})
+
+test('面板把手（grip）：head 首子元素 + 可拖拽 + touch-action:none', () => {
+  const source = readFileSync(new URL('../src/client/index.ts', import.meta.url), 'utf8')
+  // 标记：grip 是 .wtb-head 的第一个子元素
+  assert.match(source, /<div class="wtb-head">\s*<div class="wtb-grip" aria-hidden="true"><\/div>/)
+  // CSS：把手本体（含 touch-action:none，触屏不让浏览器把拖动当滚动手势）与抓握条
+  assert.match(source, /\.wtb-grip\{[^}]*position:absolute[^}]*left:50%[^}]*cursor:grab[^}]*touch-action:none[^}]*\}/)
+  assert.match(source, /\.wtb-grip::after\{content:"";width:44px;height:4px;border-radius:2px;background:currentColor;opacity:\.28\}/)
+  assert.match(source, /\.wtb-grip:active::after\{opacity:\.6\}/)
+  // 触屏：.wtb-head 也要 touch-action:none，否则 pointer 流被浏览器滚动手势取消
+  assert.match(source, /\.wtb-head\{[^}]*touch-action:none[^}]*\}/)
+  // 把手不能被任何 pointerdown 排除列表拦掉（否则抓手不响应拖拽）
+  const selectors = [...source.matchAll(/closest\('([^']+)'\)/g)].map((m) => m[1])
+  assert.ok(selectors.length >= 2)
+  for (const sel of selectors) assert.doesNotMatch(sel, /wtb-grip/)
+})
+
+test('面板主题：核心表面走宿主变量（暗色兜底值不变）+ 浅色补丁限定 body:not([data-ds-dark-theme])', () => {
+  const source = readFileSync(new URL('../src/client/index.ts', import.meta.url), 'utf8')
+  // .wtb-panel：底色/描边/文字色改用宿主变量，兜底仍是原暗色
+  assert.match(source, /\.wtb-panel\{[^}]*background:var\(--dsw-alias-bg-layer-1,rgba\(24,24,30,\.96\)\)/)
+  assert.match(source, /\.wtb-panel\{[^}]*border:1px solid var\(--dsw-alias-border-l2,rgba\(255,255,255,\.09\)\)/)
+  assert.match(source, /\.wtb-panel\{[^}]*color:var\(--dsw-alias-label-primary,#f0e6d2\)/)
+  // .wtb-head：底色/分隔线同源
+  assert.match(source, /\.wtb-head\{[^}]*background:var\(--dsw-alias-bg-layer-2,rgba\(255,255,255,\.04\)\)/)
+  assert.match(source, /\.wtb-head\{[^}]*border-bottom:1px solid var\(--dsw-alias-border-l1,rgba\(255,255,255,\.06\)\)/)
+  // 浅色补丁：每条都带 body:not([data-ds-dark-theme]) 前缀（暗色宿主零影响），条数受控
+  const light = source.match(/^body:not\(\[data-ds-dark-theme\]\) \.wtb-[^\r\n]+$/gm) ?? []
+  assert.ok(light.length >= 8 && light.length <= 24, `浅色补丁条数异常：${light.length}`)
+  // 只覆盖真实存在的类：.wtb-muted 在本文件里不存在，不得出现在补丁中
+  assert.doesNotMatch(source, /data-ds-dark-theme\]\) \.wtb-muted/)
+})

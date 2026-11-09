@@ -180,9 +180,12 @@ function injectCss(): void {
 .wtb-badgeLabel{font-size:10px;color:#9a9a9a;letter-spacing:1px;white-space:nowrap}
 .wtb-badgeSwitch{flex:none;width:22px;height:22px;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:11px;color:#8a8a8a;border:1px solid rgba(255,255,255,.1);background:transparent;cursor:pointer}
 .wtb-badgeSwitch:hover{color:#fff;border-color:rgba(255,255,255,.3)}
-.wtb-panel{position:fixed;width:400px;max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);display:flex;flex-direction:column;background:rgba(24,24,30,.96);border:1px solid rgba(255,255,255,.09);border-radius:14px;box-shadow:0 12px 44px rgba(0,0,0,.6);overflow:hidden}
-.wtb-head{position:relative;display:flex;align-items:center;gap:8px;padding:10px 12px;background:rgba(255,255,255,.04);cursor:grab;user-select:none;border-bottom:1px solid rgba(255,255,255,.06)}
+.wtb-panel{position:fixed;width:400px;max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);display:flex;flex-direction:column;background:var(--dsw-alias-bg-layer-1,rgba(24,24,30,.96));border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.09));border-radius:14px;color:var(--dsw-alias-label-primary,#f0e6d2);box-shadow:0 12px 44px rgba(0,0,0,.6);overflow:hidden}
+.wtb-head{position:relative;display:flex;align-items:center;gap:8px;padding:10px 12px;background:var(--dsw-alias-bg-layer-2,rgba(255,255,255,.04));cursor:grab;user-select:none;touch-action:none;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(255,255,255,.06))}
 .wtb-head:active{cursor:grabbing}
+.wtb-grip{position:absolute;left:50%;top:2px;transform:translateX(-50%);width:72px;height:14px;border-radius:7px;display:flex;align-items:center;justify-content:center;cursor:grab;touch-action:none;z-index:5}
+.wtb-grip::after{content:"";width:44px;height:4px;border-radius:2px;background:currentColor;opacity:.28}
+.wtb-grip:active::after{opacity:.6}
 .wtb-title{font-size:13px;font-weight:700;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .wtb-tabs{display:flex;gap:4px;margin-left:4px}
 .wtb-tab{border:none;background:transparent;color:var(--dsw-alias-label-tertiary,#9a9a9a);font-size:12px;padding:4px 8px;border-radius:6px;cursor:pointer}
@@ -358,6 +361,23 @@ function injectCss(): void {
 .wtb-empty{padding:24px;text-align:center;color:#8a8a8a;font-size:13px}
 .wtb-rangeStats{display:flex;gap:10px;flex-wrap:wrap;font-size:12px;color:#cfcfcf}
 .wtb-rangeStats b{color:#fff}
+/* 浅色宿主补丁：仅在 body 无 data-ds-dark-theme 时覆盖会被浅底吃掉对比度的类，暗色宿主不受影响 */
+body:not([data-ds-dark-theme]) .wtb-panel{box-shadow:0 12px 44px rgba(0,0,0,.16)}
+body:not([data-ds-dark-theme]) .wtb-head{background:rgba(0,0,0,.03)}
+body:not([data-ds-dark-theme]) .wtb-tab[data-active="true"]{background:rgba(0,0,0,.10);color:#1c1c1e}
+body:not([data-ds-dark-theme]) .wtb-dateBtn,body:not([data-ds-dark-theme]) .wtb-today{background:rgba(0,0,0,.05);border-color:rgba(0,0,0,.16);color:#1c1c1e}
+body:not([data-ds-dark-theme]) .wtb-dateBtn:hover,body:not([data-ds-dark-theme]) .wtb-today:hover{background:rgba(0,0,0,.11)}
+body:not([data-ds-dark-theme]) .wtb-calendar{background:#fff;border-color:rgba(0,0,0,.12);box-shadow:0 8px 24px rgba(0,0,0,.16)}
+body:not([data-ds-dark-theme]) .wtb-calTitle,body:not([data-ds-dark-theme]) .wtb-calCell,body:not([data-ds-dark-theme]) .wtb-calNav{color:#1c1c1e}
+body:not([data-ds-dark-theme]) .wtb-calNav{background:rgba(0,0,0,.05)}
+body:not([data-ds-dark-theme]) .wtb-calNav:hover{background:rgba(0,0,0,.12)}
+body:not([data-ds-dark-theme]) .wtb-calCell:hover{background:rgba(0,0,0,.08)}
+body:not([data-ds-dark-theme]) .wtb-valNum,body:not([data-ds-dark-theme]) .wtb-scoreTitle{color:#1c1c1e}
+body:not([data-ds-dark-theme]) .wtb-valLabel,body:not([data-ds-dark-theme]) .wtb-quip{color:#5b6169}
+body:not([data-ds-dark-theme]) .wtb-calDow,body:not([data-ds-dark-theme]) .wtb-heatAxis{color:#6b7075}
+body:not([data-ds-dark-theme]) .wtb-threadName,body:not([data-ds-dark-theme]) .wtb-threadDur,body:not([data-ds-dark-theme]) .wtb-boardName,body:not([data-ds-dark-theme]) .wtb-boardDur{color:#1c1c1e}
+body:not([data-ds-dark-theme]) .wtb-threadCalls,body:not([data-ds-dark-theme]) .wtb-threadAgo{color:#6b7075}
+body:not([data-ds-dark-theme]) .wtb-sectionTitle,body:not([data-ds-dark-theme]) .wtb-realmCurrent,body:not([data-ds-dark-theme]) .wtb-compName b,body:not([data-ds-dark-theme]) .wtb-dimActual,body:not([data-ds-dark-theme]) .wtb-yearDetailDay,body:not([data-ds-dark-theme]) .wtb-yearStat b{color:#1c1c1e}
 `
   document.head.appendChild(tag)
 }
@@ -926,6 +946,7 @@ class WorktimePanel {
     this.host.innerHTML = `
       <div class="wtb-panel wtb-root" style="${heightStyle}${style}">
         <div class="wtb-head">
+          <div class="wtb-grip" aria-hidden="true"></div>
           <span class="wtb-title">🐂🐴 牛马修仙看板</span>
           <div class="wtb-tabs">
             ${(['day', 'week', 'month'] as const).map((t) => `<button type="button" class="wtb-tab" data-active="${this.tab === t}" data-tab="${t}">${this.rangeLabel(t)}</button>`).join('')}
@@ -1683,15 +1704,18 @@ class WorktimePanel {
         const startLeft = rect.left
         const startTop = rect.top
         const move = (ev: PointerEvent): void => {
-          root.style.left = `${startLeft + ev.clientX - startX}px`
-          root.style.top = `${startTop + ev.clientY - startY}px`
+          // 实时钳制：拖到视口外时停在边界，面板不会被拖没（旧实现裸 delta，坐标出界还会被持久化）
+          const p = clampPlacement({ x: startLeft + ev.clientX - startX, y: startTop + ev.clientY - startY }, window.innerWidth, window.innerHeight)
+          root.style.left = `${p.x}px`
+          root.style.top = `${p.y}px`
           root.style.right = 'auto'
           root.style.bottom = 'auto'
         }
         const up = (): void => {
           window.removeEventListener('pointermove', move)
           window.removeEventListener('pointerup', up)
-          this.pos = { x: root.offsetLeft, y: root.offsetTop }
+          // 落盘前再钳一次（未发生移动的单击也会走这里，兜住默认 right/bottom 锚点换算出的坐标）
+          this.pos = clampPlacement({ x: root.offsetLeft, y: root.offsetTop }, window.innerWidth, window.innerHeight)
           persistPlacement(this.pos, this.height) // 全量形状：挪位不抹掉已存高度（未拖过时 h=null，软默认继续生效）
         }
         window.addEventListener('pointermove', move)
